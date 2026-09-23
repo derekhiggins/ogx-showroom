@@ -24,7 +24,7 @@ wait_for() {
 }
 
 wait_for 'ExternalProvider' "test \"\$(oc get externalprovider praxis-mvp-provider-a -n '$TENANT_NAMESPACE' -o jsonpath='{.status.phase}')\" = Ready"
-wait_for 'ExternalModel' "test \"\$(oc get externalmodel praxis-mvp-demo -n '$TENANT_NAMESPACE' -o jsonpath='{.status.phase}')\" = Ready"
+wait_for 'ExternalModel' "test \"\$(oc get externalmodel '$MODEL_NAME' -n '$TENANT_NAMESPACE' -o jsonpath='{.status.phase}')\" = Ready"
 wait_for 'Praxis' "oc get deployment -n '$TENANT_NAMESPACE' -l app=praxis -o json | jq -e '.items[0].status.availableReplicas == 1'"
 praxis_image="$(oc get pod -n "$TENANT_NAMESPACE" -l app=praxis -o jsonpath='{.items[0].spec.containers[0].image}')"
 [[ "$praxis_image" == "$PRAXIS_IMAGE" ]] || { printf 'ERROR: Praxis runs %s, expected %s\n' "$praxis_image" "$PRAXIS_IMAGE" >&2; exit 1; }
@@ -55,7 +55,7 @@ chmod 600 "$tmp_dir/key-header"
 rm -f "$tmp_dir/key.json"
 
 url="https://$host/$TENANT_NAMESPACE/$MODEL_NAME/v1/chat/completions"
-body="{\"model\":\"$MODEL_NAME\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: LiteMaaS reachable\"}],\"max_tokens\":32}"
+body="{\"model\":\"$MODEL_NAME\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: OpenAI reachable\"}],\"max_tokens\":32}"
 request() {
   curl -ksS --max-time 60 -o "$tmp_dir/response.json" -w '%{http_code}' \
     -H @"$tmp_dir/key-header" -H 'Content-Type: application/json' --data "$body" "$url"
@@ -64,7 +64,7 @@ request() {
 status="$(request)"
 [[ "$status" == 200 ]] || { printf 'ERROR: gateway request returned HTTP %s\n' "$status" >&2; exit 1; }
 cat "$tmp_dir/response.json"
-jq -e --arg model "$PROVIDER_MODEL" '.model | contains($model)' "$tmp_dir/response.json" >/dev/null || { printf 'ERROR: response did not use the LiteMaaS Qwen model\n' >&2; exit 1; }
+jq -e --arg model "$PROVIDER_MODEL" '.model | contains($model)' "$tmp_dir/response.json" >/dev/null || { printf 'ERROR: response did not use the OpenAI model\n' >&2; exit 1; }
 
 missing_status="$(curl -ksS --max-time 30 -o /dev/null -w '%{http_code}' -H @"$tmp_dir/key-header" \
   -H 'Content-Type: application/json' --data '{"model":"missing","messages":[]}' \
@@ -78,4 +78,4 @@ if [[ -n "$OGX_UID" ]]; then
     [[ "$(oc get pod -n "$APPLICATIONS_NAMESPACE" -l app=ogx -o jsonpath='{.items[0].metadata.uid}')" == "$OGX_POD_UID" ]] || { printf 'ERROR: pre-existing OGX pod was replaced\n' >&2; exit 1; }
   fi
 fi
-printf 'PASS: ExternalModel routed through Praxis to LiteMaaS and OGX was preserved.\n'
+printf 'PASS: ExternalModel routed through Praxis to OpenAI and OGX was preserved.\n'

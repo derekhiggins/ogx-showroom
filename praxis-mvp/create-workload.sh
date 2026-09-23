@@ -13,7 +13,7 @@ timeout="${PRAXIS_MVP_TIMEOUT:-15m}"
 
 for command in oc jq openssl yq; do command -v "$command" >/dev/null || { printf 'ERROR: %s is required\n' "$command" >&2; exit 1; }; done
 [[ -f "$images_file" ]] || { printf 'ERROR: run build-images.sh first\n' >&2; exit 1; }
-: "${LITEMAAS_API_KEY:?set LITEMAAS_API_KEY before creating the workload}"
+: "${OPENAI_API_KEY:?set OPENAI_API_KEY before creating the workload}"
 # shellcheck disable=SC1090
 source "$images_file"
 oc whoami >/dev/null || { printf 'ERROR: log in to OpenShift first\n' >&2; exit 1; }
@@ -278,36 +278,36 @@ tenant_namespace="$(oc get aitenant "$tenant" -n ai-tenants -o jsonpath='{.statu
 [[ -n "$tenant_namespace" ]] || { printf 'ERROR: MaaS did not report a tenant namespace\n' >&2; exit 1; }
 
 oc create secret generic praxis-mvp-provider-credentials -n "$tenant_namespace" \
-  --from-literal=api-key="$LITEMAAS_API_KEY" --dry-run=client -o yaml | oc apply -f -
+  --from-literal=api-key="$OPENAI_API_KEY" --dry-run=client -o yaml | oc apply -f -
 user="$(oc whoami)"
 oc apply -f - <<EOF
 apiVersion: inference.opendatahub.io/v1alpha1
 kind: ExternalProvider
 metadata: {name: praxis-mvp-provider-a, namespace: $tenant_namespace, labels: {app.kubernetes.io/managed-by: praxis-mvp}}
-spec: {provider: openai, endpoint: litemaas.rhoai.rh-aiservices-bu.com, auth: {type: apikey, secretRef: {name: praxis-mvp-provider-credentials}}}
+spec: {provider: openai, endpoint: api.openai.com, auth: {type: apikey, secretRef: {name: praxis-mvp-provider-credentials}}}
 ---
 apiVersion: inference.opendatahub.io/v1alpha1
 kind: ExternalModel
-metadata: {name: praxis-mvp-demo, namespace: $tenant_namespace, labels: {app.kubernetes.io/managed-by: praxis-mvp}}
+metadata: {name: gpt-4o-mini, namespace: $tenant_namespace, labels: {app.kubernetes.io/managed-by: praxis-mvp}}
 spec:
-  modelName: praxis-mvp-demo
+  modelName: gpt-4o-mini
   externalProviderRefs:
-  - {ref: {name: praxis-mvp-provider-a}, targetModel: Qwen2.5-VL-7B-Instruct, apiFormat: openai-chat, path: /v1/chat/completions, weight: 1}
+  - {ref: {name: praxis-mvp-provider-a}, targetModel: gpt-4o-mini, apiFormat: openai-chat, path: /v1/chat/completions, weight: 1}
 ---
 apiVersion: maas.opendatahub.io/v1alpha1
 kind: MaaSModelRef
-metadata: {name: praxis-mvp-demo, namespace: $tenant_namespace, labels: {app.kubernetes.io/managed-by: praxis-mvp}}
-spec: {modelRef: {kind: ExternalModel, name: praxis-mvp-demo}}
+metadata: {name: gpt-4o-mini, namespace: $tenant_namespace, labels: {app.kubernetes.io/managed-by: praxis-mvp}}
+spec: {modelRef: {kind: ExternalModel, name: gpt-4o-mini}}
 ---
 apiVersion: maas.opendatahub.io/v1alpha1
 kind: MaaSSubscription
 metadata: {name: praxis-mvp, namespace: $tenant_namespace, labels: {app.kubernetes.io/managed-by: praxis-mvp}}
-spec: {owner: {users: [$user]}, modelRefs: [{name: praxis-mvp-demo, namespace: $tenant_namespace, tokenRateLimits: [{limit: 10000, window: 1m}]}], priority: 10}
+spec: {owner: {users: [$user]}, modelRefs: [{name: gpt-4o-mini, namespace: $tenant_namespace, tokenRateLimits: [{limit: 10000, window: 1m}]}], priority: 10}
 ---
 apiVersion: maas.opendatahub.io/v1alpha1
 kind: MaaSAuthPolicy
 metadata: {name: praxis-mvp, namespace: $tenant_namespace, labels: {app.kubernetes.io/managed-by: praxis-mvp}}
-spec: {modelRefs: [{name: praxis-mvp-demo, namespace: $tenant_namespace}], subjects: {users: [$user]}}
+spec: {modelRefs: [{name: gpt-4o-mini, namespace: $tenant_namespace}], subjects: {users: [$user]}}
 EOF
 
 cat >"$script_dir/artifacts/workload.env" <<EOF
@@ -316,8 +316,8 @@ TENANT_NAMESPACE=$tenant_namespace
 GATEWAY_NAME=$gateway_name
 GATEWAY_NAMESPACE=$gateway_namespace
 APPLICATIONS_NAMESPACE=$applications_namespace
-MODEL_NAME=praxis-mvp-demo
-PROVIDER_MODEL=Qwen2.5-VL-7B-Instruct
+MODEL_NAME=gpt-4o-mini
+PROVIDER_MODEL=gpt-4o-mini
 OGX_UID=$ogx_uid
 OGX_POD_UID=$ogx_pod_uid
 EOF

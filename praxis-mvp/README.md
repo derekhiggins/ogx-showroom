@@ -7,7 +7,7 @@ For a cold run, use `cleanup-all.sh`, then reinstall with `./setup.sh` and
 `./provision.sh` before running the commands below.
 
 ```bash
-export LITEMAAS_API_KEY="$(ls-secrets LITEMAAS_API_KEY)"
+export OPENAI_API_KEY="your-openai-api-key"
 podman login quay.io
 ./praxis-mvp/build-images.sh
 ./praxis-mvp/create-workload.sh
@@ -32,16 +32,14 @@ the whole untagged repository at once:
 PRAXIS_MVP_REGISTRY=quay.io/yourname/imagehost ./praxis-mvp/build-images.sh
 ```
 
-The workload opts the default MaaS tenant into Praxis and adds a LiteMaaS
-ExternalProvider for `Qwen2.5-VL-7B-Instruct`. A second tenant is not used
+The workload opts the default MaaS tenant into Praxis and adds an OpenAI
+ExternalProvider for `gpt-4o-mini`. A second tenant is not used
 because multi-tenant MaaS callback routing remains unqualified. The test
-verifies authenticated LiteMaaS routing using `Qwen2.5-VL-7B-Instruct`,
-unknown-model handling, the custom Praxis image, and preservation and
+verifies authenticated OpenAI routing using `gpt-4o-mini`,
+unknown-model handling, the locally built ExtProc image, and preservation and
 availability of the pre-existing OGXServer.
 
-The client-facing model name currently matches the LiteMaaS provider model.
-`MODEL_TRANSLATION_BUG.md` tracks the missing `targetModel` translation needed
-to restore a stable MaaS alias.
+The client-facing model name and provider target model are both `gpt-4o-mini`.
 
 The cleanup is intentionally destructive:
 
