@@ -1,0 +1,48 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: praxis-gateway-isolation, namespace: grid-system}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: praxis-gateway}
+    matchExpressions:
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [consumer-gateway, provider-gateway]
+  policyTypes: [Ingress]
+  ingress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: consumer-gateway, namespace: grid-system}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: praxis-gateway
+      app.kubernetes.io/instance: consumer-gateway
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: openshift-ingress}
+          podSelector:
+            matchLabels: {gateway.networking.k8s.io/gateway-name: praxis-mvp}
+      ports: [{port: 8080, protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: provider-gateway, namespace: grid-system}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: praxis-gateway
+      app.kubernetes.io/instance: provider-gateway
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: grid-system}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: praxis-gateway
+              app.kubernetes.io/instance: consumer-gateway
+      ports: [{port: 8443, protocol: TCP}, {port: 8444, protocol: TCP}]

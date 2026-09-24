@@ -1,0 +1,83 @@
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_upstreams: true
+  # Authorino covers all public APIs; entitlement applies to inference POSTs.
+  skip_pipeline_checks:
+    conditional_security: true
+listeners:
+  - name: consumer
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        request_remove: [Authorization, x-api-key]
+      - filter: policy
+        conditions:
+          - when: {path: /v1/chat/completions, methods: [POST]}
+        config_path: /etc/praxis/model-policy/policy.yaml
+        body_access: read_only
+        llm: {require_model: true, require_route: true}
+      - filter: policy
+        conditions:
+          - when: {path: /v1/responses, methods: [POST]}
+        config_path: /etc/praxis/model-policy/policy.yaml
+        body_access: read_only
+        llm: {require_model: true, require_route: true}
+      - filter: headers
+        conditions:
+          - unless: {path: /v1/responses, methods: [POST]}
+          - unless: {path: /v1/chat/completions, methods: [POST]}
+        branch_chains:
+          - name: provider-services
+            rejoin: terminal
+            chains: [provider-state-dispatch]
+      - filter: json_body_field
+        field: model
+        header: X-Model
+      - filter: intelligent_route
+        overlay_file: /etc/praxis/routing/routing-overlay.json
+        model_header: X-Model
+        provider_hop_clusters: [openai-mvp-provider]
+        expected_overlay_scope:
+          network: praxis-mvp
+          gateway: consumer-gateway
+          namespace: grid-system
+          local_site: mvp
+        reload: {enabled: true, debounce_ms: 500}
+      - filter: load_balancer
+        clusters:
+          - name: openai-mvp-provider
+            tls:
+              ca: {ca_path: /etc/praxis/tls/ca.crt}
+              client_cert:
+                cert_path: /etc/praxis/tls/tls.crt
+                key_path: /etc/praxis/tls/tls.key
+              sni: mvp-provider.grid.internal
+              verify: true
+            endpoints: [provider-gateway.grid-system.svc.cluster.local:8443]
+  - name: provider-state-dispatch
+    filters:
+      - filter: router
+        routes:
+          - {path_prefix: /v1/files, cluster: provider-state}
+          - {path_prefix: /v1/vector_stores, cluster: provider-state}
+          - {path_prefix: /v1/models, cluster: provider-state}
+          - {path_prefix: /v1/prompts, cluster: provider-state}
+          - {path_prefix: /v1/embeddings, cluster: provider-state}
+          - {path_prefix: /v1/responses/, cluster: provider-state}
+          - {path_prefix: /v1/conversations, cluster: provider-state}
+      - filter: load_balancer
+        clusters:
+          - name: provider-state
+            tls:
+              ca: {ca_path: /etc/praxis/tls/ca.crt}
+              client_cert:
+                cert_path: /etc/praxis/tls/tls.crt
+                key_path: /etc/praxis/tls/tls.key
+              sni: mvp-provider.grid.internal
+              verify: true
+            endpoints: [provider-state.grid-system.svc.cluster.local:8444]
+admin:
+  address: "127.0.0.1:9901"

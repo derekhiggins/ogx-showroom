@@ -1,0 +1,10 @@
+spec:
+  listener:
+    tls: {enabled: false}
+  volumes:
+    items:
+      - name: openshift-service-ca
+        mountPath: /etc/ssl/certs/openshift-service-ca
+        configMaps: [openshift-service-ca.crt]
+        items:
+          - {key: service-ca.crt, path: service-ca-bundle.crt}

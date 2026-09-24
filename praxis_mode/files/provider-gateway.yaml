@@ -1,0 +1,30 @@
+fullnameOverride: provider-gateway
+replicaCount: 1
+config:
+  existingConfigMap: provider-praxis-config
+overlay:
+  enabled: false
+env:
+  - name: OPENAI_API_KEY
+    valueFrom:
+      secretKeyRef: {name: openai-credential, key: token}
+  - name: PGUSER
+    valueFrom:
+      secretKeyRef: {name: praxis-store, key: POSTGRES_USER}
+  - name: PGPASSWORD
+    valueFrom:
+      secretKeyRef: {name: praxis-store, key: POSTGRES_PASSWORD}
+tls:
+  enabled: true
+  existingSecret: provider-tls
+port:
+  containerPort: 8443
+  name: https
+service:
+  type: ClusterIP
+  port: 8443
+health:
+  readiness:
+    tcpSocket: {port: 8443}
+  liveness:
+    tcpSocket: {port: 8443}

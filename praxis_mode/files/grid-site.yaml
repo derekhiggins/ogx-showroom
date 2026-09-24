@@ -1,0 +1,30 @@
+gridNetwork:
+  name: praxis-mvp
+  gridId: praxis-mvp
+  region: local
+  zone: mvp
+  tls:
+    caSecretRef: {name: grid-ca, namespace: grid-system}
+    siteSecretRef: {name: consumer-tls, namespace: grid-system}
+  gatewayRefs:
+    - {name: consumer-gateway, namespace: grid-system, localSiteName: mvp}
+gridSite:
+  name: mvp
+  region: local
+  zone: mvp
+  providerSiteLabel: mvp
+inferenceProviders:
+  - name: openai-mvp-provider
+    gridNetworkRef: praxis-mvp
+    providerKind: open_ai
+    backendKind: api_provider
+    endpoint: https://api.openai.com
+    auth:
+      strategy: bearer_token
+      secretRef: {name: openai-credential, namespace: grid-system, key: token}
+    siteSelector:
+      matchLabels: {grid.praxis-proxy.io/provider-site: mvp}
+    accessPolicy:
+      siteSelector:
+        matchLabels: {}
+    models: [] # prepare.sh adds the selected model and retains existing models.

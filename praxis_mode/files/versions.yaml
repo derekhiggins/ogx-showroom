@@ -1,0 +1,10 @@
+# Published prereleases used by the MVP. Verify archives before use.
+model: gpt-4.1-mini
+grid:
+  version: "0.1.4"
+  releaseUrl: https://github.com/praxis-proxy/grid/releases/download/v0.1.4
+  operatorSha256: 80c5f45cb9add59613e2f8e070ff34d8807a5fb9e201519f2a3e22b4c7036fce
+  siteSha256: d3c601611be871f6d402963611f2dd691f2bdffbe06bb51a1d9803793f65f069
+  gatewaySha256: 871f4b0ecbab12c482414a52857ba96ed4ce2fe368c73c830fa614b0d746e37e
+praxis:
+  image: ghcr.io/praxis-proxy/ai:0.4.0

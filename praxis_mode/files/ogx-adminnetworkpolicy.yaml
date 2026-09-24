@@ -1,0 +1,55 @@
+apiVersion: policy.networking.k8s.io/v1alpha1
+kind: AdminNetworkPolicy
+metadata:
+  name: praxis-mvp-ogx
+  labels: {app.kubernetes.io/managed-by: showroom-praxis}
+spec:
+  priority: 0
+  subject:
+    pods:
+      namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: redhat-ods-applications}
+      podSelector:
+        matchLabels: {app: ogx, app.kubernetes.io/instance: ogx-distribution}
+  ingress:
+    - name: provider-api
+      action: Allow
+      from:
+        - pods:
+            namespaceSelector:
+              matchLabels: {kubernetes.io/metadata.name: grid-system}
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: praxis-gateway
+                app.kubernetes.io/instance: provider-gateway
+      ports: [{portNumber: {protocol: TCP, port: 8321}}]
+    - name: operator-health
+      action: Allow
+      from:
+        - pods:
+            namespaceSelector:
+              matchLabels: {kubernetes.io/metadata.name: redhat-ods-applications}
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: ogx-k8s-operator
+                control-plane: controller-manager
+      ports: [{portNumber: {protocol: TCP, port: 8321}}]
+    - name: monitoring
+      action: Allow
+      from:
+        - namespaces:
+            matchLabels: {network.openshift.io/policy-group: monitoring}
+        - namespaces:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [redhat-ods-monitoring, openshift-monitoring, openshift-user-workload-monitoring]
+        - pods:
+            namespaceSelector:
+              matchLabels: {kubernetes.io/metadata.name: redhat-ods-applications}
+            podSelector:
+              matchLabels: {app: prometheus}
+      ports: [{portNumber: {protocol: TCP, port: 9464}}]
+    - name: deny-other-pods
+      action: Deny
+      from: [{namespaces: {}}]

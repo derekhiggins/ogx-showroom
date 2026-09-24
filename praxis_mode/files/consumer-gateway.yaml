@@ -1,0 +1,26 @@
+fullnameOverride: consumer-gateway
+replicaCount: 1
+config:
+  existingConfigMap: consumer-praxis-config
+overlay:
+  enabled: true
+  existingConfigMap: grid-overlay-praxis-mvp-consumer-gateway
+  sidecar:
+    enabled: false
+tls:
+  enabled: true
+  existingSecret: consumer-tls
+credentials:
+  - name: praxis-model-policy
+    mountPath: /etc/praxis/model-policy
+service:
+  type: ClusterIP
+  port: 8080
+port:
+  containerPort: 8080
+  name: http
+health:
+  readiness:
+    tcpSocket: {port: 8080}
+  liveness:
+    tcpSocket: {port: 8080}

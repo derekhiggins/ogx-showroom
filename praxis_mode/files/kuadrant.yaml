@@ -1,0 +1,11 @@
+apiVersion: kuadrant.io/v1beta1
+kind: Kuadrant
+metadata: {name: kuadrant, namespace: kuadrant-system}
+spec: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openshift-service-ca.crt
+  namespace: kuadrant-system
+  annotations: {service.beta.openshift.io/inject-cabundle: "true"}

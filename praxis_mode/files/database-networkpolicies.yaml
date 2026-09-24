@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: praxis-mvp-postgres, namespace: redhat-ods-applications}
+spec:
+  podSelector: {matchLabels: {app: postgres}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: grid-system}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: provider-gateway
+              app.kubernetes.io/name: praxis-gateway
+      ports: [{port: 5432, protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: praxis-mvp-maas-postgres, namespace: redhat-ods-applications}
+spec:
+  podSelector: {matchLabels: {app: postgres}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: redhat-ai-gateway-infra}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: maas-api}
+      ports: [{port: 5432, protocol: TCP}]

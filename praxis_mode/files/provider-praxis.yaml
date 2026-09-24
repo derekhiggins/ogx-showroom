@@ -1,0 +1,181 @@
+# install.sh fills __MODEL__, __CANDIDATE__, __OGX_URL__ and __OGX_ENDPOINT__.
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_upstreams: true
+listeners:
+  - name: provider
+    address: "0.0.0.0:8443"
+    filter_chains: [main]
+    tls:
+      certificates:
+        - {cert_path: /etc/praxis/tls/tls.crt, key_path: /etc/praxis/tls/tls.key}
+      client_ca: {ca_path: /etc/praxis/tls/ca.crt}
+      client_cert_mode: require
+  - name: provider-state
+    address: "0.0.0.0:8444"
+    filter_chains: [state-dispatch]
+    tls:
+      certificates:
+        - {cert_path: /etc/praxis/tls/tls.crt, key_path: /etc/praxis/tls/tls.key}
+      client_ca: {ca_path: /etc/praxis/tls/ca.crt}
+      client_cert_mode: require
+  - name: agentic
+    address: "127.0.0.1:8081"
+    filter_chains: [full-flow-agentic-pipeline]
+filter_chains:
+  - name: main
+    filters:
+      - filter: peer_identity_trust
+        trusted_peers: [{organization: ai-grid}]
+      - filter: json_body_field
+        field: model
+        header: X-Model
+      - filter: provider_route
+        provider_id: mvp
+        model_header: X-Model
+        routes:
+          - candidate_id: "__CANDIDATE__"
+            model: __MODEL__
+            paths: [/v1/chat/completions, /v1/responses]
+            cluster: agentic-backend
+      - filter: load_balancer
+        clusters:
+          - {name: agentic-backend, endpoints: ["127.0.0.1:8081"]}
+  - name: state-dispatch
+    filters:
+      - filter: peer_identity_trust
+        trusted_peers: [{organization: ai-grid}]
+      - filter: router
+        routes:
+          - {path_prefix: /v1/files, cluster: ogx-backend}
+          - {path_prefix: /v1/vector_stores, cluster: ogx-backend}
+          - {path_prefix: /v1/models, cluster: ogx-backend}
+          - {path_prefix: /v1/prompts, cluster: ogx-backend}
+          - {path_prefix: /v1/embeddings, cluster: ogx-backend}
+          - {path_prefix: /v1/responses/, cluster: agentic-backend}
+          - {path_prefix: /v1/conversations, cluster: agentic-backend}
+      - filter: load_balancer
+        clusters:
+          - {name: ogx-backend, endpoints: ["__OGX_ENDPOINT__"]}
+          - {name: agentic-backend, endpoints: ["127.0.0.1:8081"]}
+  # Adapted from the MVP's Praxis AI 0.4.0 pipeline; retain its state tables/owners.
+  - name: full-flow-agentic-pipeline
+    filters:
+      - filter: trace_context
+      - filter: state_owner
+        mode: trusted_headers
+        tenant: {header: x-maas-owner-tenant}
+        issuer: {static: "urn:maas:api-key"}
+        subject: {header: x-maas-username}
+      - filter: openai_operation
+      - filter: openai_conversations
+        backend: postgres
+        database_url: postgres://postgres.redhat-ods-applications.svc.cluster.local:5432/praxis_mvp
+        ssl_mode: disable
+        allow_private_database_url: true
+        conversations_table: openai_conversations
+        items_table: openai_conversation_items
+      - filter: openai_responses_format
+        on_invalid: continue
+        headers:
+          format: x-praxis-ai-format
+          model: x-praxis-ai-model
+          stream: x-praxis-ai-stream
+          mode: x-praxis-responses-mode
+      - filter: openai_responses_validate
+      - filter: openai_tool_parse
+      - filter: openai_response_store
+        backend: postgres
+        database_url: postgres://postgres.redhat-ods-applications.svc.cluster.local:5432/praxis_mvp
+        ssl_mode: disable
+        allow_private_database_url: true
+        responses_table: openai_responses
+        conversations_table: openai_conversations
+      - filter: openai_responses_rehydrate
+      - filter: openai_file_resolve
+        files_api_url: __OGX_URL__
+        forward_headers: [x-user-id, x-tenant-id]
+        allow_pre_security_callout: true
+        on_missing: reject
+        timeout_ms: 10000
+      - filter: openai_doc_extract
+        allow_pre_security_callout: true
+        on_unsupported: continue
+      - filter: headers
+        conditions:
+          - unless:
+              path: /v1/responses
+              methods: [POST]
+              headers: {x-praxis-ai-format: openai_responses}
+        branch_chains:
+          - name: bypass-irr
+            rejoin: terminal
+            chains:
+              - name: chat-completions
+                filters:
+                  - filter: router
+                    routes: [{path: /v1/chat/completions, cluster: openai-backend}]
+                  - filter: headers
+                    request_set: [{name: Host, value: api.openai.com}]
+                  - filter: credential_injection
+                    clusters:
+                      - {name: openai-backend, header: Authorization, env_var: OPENAI_API_KEY, header_prefix: "Bearer "}
+                  - filter: load_balancer
+                    clusters:
+                      - name: openai-backend
+                        tls: {sni: api.openai.com, verify: true}
+                        endpoints: ["api.openai.com:443"]
+      - filter: iterative_request_router
+        initial_step: inference
+        max_iterations: 8
+        timeout_ms: 360000
+        step_timeout_ms: 300000
+        max_response_bytes: 67108864
+        max_stream_response_bytes: 67108864
+        max_state_bytes: 136314880
+        steps:
+          - name: inference
+            filters:
+              - filter: openai_stream_events
+                max_buffer_bytes: 67108864
+                max_events: 200000
+                timeout_secs: 600
+              - filter: openai_file_search_callout
+                vector_store_url: __OGX_URL__
+                forward_headers: [x-user-id, x-tenant-id]
+                timeout_ms: 5000
+                max_response_bytes: 10485760
+                max_total_response_bytes: 67108864
+                max_state_bytes: 136314880
+                on_failure: closed
+              - filter: openai_agentic_loop
+                max_infer_iters: 7
+              - filter: headers
+                request_set:
+                  - {name: Content-Type, value: application/json}
+                  - {name: Host, value: api.openai.com}
+              - filter: router
+                routes: [{path: /v1/responses, cluster: openai-backend}]
+              - filter: credential_injection
+                clusters:
+                  - {name: openai-backend, header: Authorization, env_var: OPENAI_API_KEY, header_prefix: "Bearer "}
+              - filter: load_balancer
+                clusters:
+                  - name: openai-backend
+                    http:
+                      application_protocol: openai_chat_completions
+                      application_provider: openai
+                    tls: {sni: api.openai.com, verify: true}
+                    endpoints: ["api.openai.com:443"]
+              - filter: responses_to_chat_completions
+                max_rewritten_body_bytes: 33554432
+                max_emitted_sse_frame_bytes: 50331648
+                max_stream_events: 100000
+                stream_timeout_secs: 300
+              - filter: path_rewrite
+                replace: {pattern: "^/v1/responses/?$", replacement: /v1/chat/completions}
+            on_result:
+              - {filter: openai_agentic_loop, key: action, value: loop, next: inference}
+              - {default: true, done: true}
+admin:
+  address: "127.0.0.1:9901"

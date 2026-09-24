@@ -1,0 +1,14 @@
+spec:
+  praxisMode:
+    enabled: true
+    praxisSelector:
+      namespace: grid-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: praxis-gateway
+          app.kubernetes.io/instance: provider-gateway
+  network:
+    externalAccess:
+      enabled: false
+    policy:
+      enabled: true

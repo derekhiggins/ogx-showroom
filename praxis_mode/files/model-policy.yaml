@@ -1,0 +1,22 @@
+global:
+  pdp:
+    - kind: opa
+      on_error: deny
+      data:
+        model_refs: {} # Filled from versions.yaml.
+      modules:
+        - |
+          package praxis.subscription
+          default allow := false
+          allow if {
+            info := json.unmarshal(input.http.request_headers["x-maas-subscription-info"])
+            info.namespace == "models-as-a-service"
+            ref := info.modelRefs[_]
+            ref.name == data.model_refs[input.llm.model_id]
+          }
+routes:
+  - llm: "*"
+    authorization:
+      pre_invocation:
+        - opa:
+            query: data.praxis.subscription.allow

@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: Pod
+metadata: {name: "", namespace: ""}
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  activeDeadlineSeconds: 1800
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: probe
+      image: "" # Use the deployed OGX image, which includes Python.
+      command: [python3, -c, "import time; time.sleep(1800)"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+      resources:
+        requests: {cpu: 10m, memory: 64Mi}
+        limits: {cpu: 100m, memory: 128Mi}
+      # Trusted-source labels must not add this probe to gateway Service endpoints.
+      readinessProbe:
+        exec: {command: [python3, -c, "raise SystemExit(1)"]}
+        periodSeconds: 10
