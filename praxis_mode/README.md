@@ -30,6 +30,7 @@ CONTEXT=YOUR_CONTEXT
 | `test.sh` | Verify authenticated APIs, entitlement, ownership and live ingress isolation; remove temporary test resources. |
 | `demo.sh` | Create a one-hour key, list vector stores and make a hello-world inference call. |
 | `cleanup.sh` | Full destructive teardown of Praxis and the shared Grid/RHCL/MaaS stack. |
+| `lib.sh` | Shared helpers sourced by the scripts above; not run directly. |
 
 Scripts accept `--context`, default to the current context and do not change
 kubeconfig's current context. Installation replaces direct public OGX access and

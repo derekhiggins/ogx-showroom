@@ -3,14 +3,12 @@
 set -euo pipefail
 umask 077
 
-CONTEXT=""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+source "${SCRIPT_DIR}/lib.sh"
 
-die() { echo "ERROR: $*" >&2; exit 1; }
-usage() {
-  echo "Usage: $0 [--context CONTEXT]"
-  echo "Create a one-hour MaaS key, list vector stores and run hello-world inference."
-}
-k() { oc --context "$CONTEXT" --request-timeout=30s "$@" 2>/dev/null; }
+USAGE="Create a one-hour MaaS key, list vector stores and run hello-world inference."
+
 request() {
   local key="$1"
   shift
@@ -18,21 +16,10 @@ request() {
     curl --noproxy '*' --fail --silent --show-error --header @- "$@"
 }
 
-while (($#)); do
-  case "$1" in
-    --context)
-      [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || die "--context requires a value"
-      CONTEXT="$2"; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
-    *) usage >&2; exit 1 ;;
-  esac
-done
-for tool in oc curl jq; do
-  command -v "$tool" >/dev/null || die "$tool is required"
-done
-if [[ -z "$CONTEXT" ]]; then
-  CONTEXT="$(oc config current-context 2>/dev/null)" || die "Pass --context CONTEXT"
-fi
+parse_args "$@"
+require_tools oc curl jq
+resolve_context
+
 HOST="$(k -n openshift-ingress get route praxis-mvp -o jsonpath='{.spec.host}')" \
   || die "Cannot find the Praxis Route"
 [[ "$HOST" =~ ^[a-zA-Z0-9.-]+$ ]] || die "Praxis Route has no valid hostname"

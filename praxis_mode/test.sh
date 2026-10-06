@@ -4,28 +4,18 @@ set -euo pipefail
 umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONTEXT=""
-usage() {
-  echo "Usage: $0 [--context CONTEXT]"
-  echo "Verify installed Praxis APIs, entitlement, ownership and network isolation."
-  echo "Makes small OpenAI requests and cleans up temporary test resources."
-}
-while (($#)); do
-  case "$1" in
-    --context)
-      [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || { usage >&2; exit 1; }
-      CONTEXT="$2"; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
-    *) usage >&2; exit 1 ;;
-  esac
-done
-command -v oc >/dev/null || { echo "ERROR: oc is required" >&2; exit 1; }
-if [[ -z "$CONTEXT" ]]; then
-  CONTEXT="$(oc config current-context 2>/dev/null)" || { echo "ERROR: Pass --context CONTEXT" >&2; exit 1; }
-fi
-"${SCRIPT_DIR}/pre-flight.sh" --context "$CONTEXT"
+# shellcheck source=lib.sh
+source "${SCRIPT_DIR}/lib.sh"
 
-uv run --locked --project "${SCRIPT_DIR}/.." python - "$CONTEXT" "${SCRIPT_DIR}/files" <<'PY'
+USAGE="Verify installed Praxis APIs, entitlement, ownership and network isolation.
+Makes small OpenAI requests and cleans up temporary test resources."
+
+parse_args "$@"
+require_tools oc
+resolve_context
+preflight
+
+uv run --locked --project "${SCRIPT_DIR}/.." python - "$CONTEXT" "$FILES" <<'PY'
 import base64
 import copy
 import json

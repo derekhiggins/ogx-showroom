@@ -4,40 +4,18 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONTEXT=""
-NAMESPACE=redhat-ods-applications
-TIMEOUT=15m
+# shellcheck source=lib.sh
+source "${SCRIPT_DIR}/lib.sh"
 
-die() { echo "ERROR: $*" >&2; exit 1; }
-usage() {
-  echo "Usage: $0 [--context CONTEXT]"
-  echo "Remove Praxis, Grid, RHCL/Kuadrant and MaaS, including both Praxis databases."
-  echo "Deletes grid-system, kuadrant-system, models-as-a-service and redhat-ai-gateway-infra."
-  echo "Keeps OGX isolated with its configuration and praxis-mvp-ogx AdminNetworkPolicy."
-}
-k() { oc --context "$CONTEXT" --request-timeout=30s "$@" 2>/dev/null; }
-delete() { k delete --request-timeout=0 --ignore-not-found --timeout="$TIMEOUT" "$@" >/dev/null; }
+USAGE="Remove Praxis, Grid, RHCL/Kuadrant and MaaS, including both Praxis databases.
+Deletes grid-system, kuadrant-system, models-as-a-service and redhat-ai-gateway-infra.
+Keeps OGX isolated with its configuration and praxis-mvp-ogx AdminNetworkPolicy."
 
-while (($#)); do
-  case "$1" in
-    --context)
-      [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || die "--context requires a value"
-      CONTEXT="$2"; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
-    *) usage >&2; exit 1 ;;
-  esac
-done
-for tool in oc helm jq yq; do
-  command -v "$tool" >/dev/null || die "$tool is required"
-done
-if [[ -z "$CONTEXT" ]]; then
-  CONTEXT="$(oc config current-context 2>/dev/null)" || die "Pass --context CONTEXT"
-fi
-WORK_DIR="$(mktemp -d)"
-trap 'rm -rf "$WORK_DIR"' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'echo "ERROR: Cleanup failed at line $LINENO. Resolve the failure and rerun." >&2' ERR
+parse_args "$@"
+require_tools oc helm jq yq
+resolve_context
+
+setup_workdir Cleanup
 
 # Discover APIs explicitly so missing CRDs are harmless, but failed reads are not.
 k get crd -o json > "${WORK_DIR}/crds.json"
@@ -81,7 +59,7 @@ if has_crd ogxservers.ogx.io; then
     [[ "$port" =~ ^[0-9]+$ ]] && ((port > 0 && port <= 65535)) || die "Invalid OGX API port"
     PORT="$port" yq -o=json \
       '(.spec.ingress[0].ports[0].portNumber.port, .spec.ingress[1].ports[0].portNumber.port) = env(PORT)' \
-      "${SCRIPT_DIR}/files/ogx-adminnetworkpolicy.yaml" > "${WORK_DIR}/isolation.json"
+      "${FILES}/ogx-adminnetworkpolicy.yaml" > "${WORK_DIR}/isolation.json"
     policies="$(k get adminnetworkpolicies -o json)"
     if ! jq -e --slurpfile expected "${WORK_DIR}/isolation.json" '
       all(.items[];

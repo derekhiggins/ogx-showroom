@@ -2,36 +2,20 @@
 set +x
 set -euo pipefail
 
-CONTEXT=""
-NAMESPACE=redhat-ods-applications
-OGX_NAME=ogx-distribution
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REQUEST_TIMEOUT=15s
+# shellcheck source=lib.sh
+source "${SCRIPT_DIR}/lib.sh"
+
+OGX_NAME=ogx-distribution
 FAILURES=0
 PENDING=0
-
-usage() {
-  echo "Usage: $0 [--context CONTEXT]"
-  echo "Read-only prerequisite checks for Praxis mode after ./provision.sh."
-}
+USAGE="Read-only prerequisite checks for Praxis mode after ./provision.sh."
 
 fail() { echo "FAIL: $*" >&2; FAILURES=$((FAILURES + 1)); }
 pending() { echo "PREPARE: $*"; PENDING=$((PENDING + 1)); }
-k() { oc --context "$CONTEXT" --request-timeout=15s "$@" 2>/dev/null; }
 
-while (($#)); do
-  case "$1" in
-    --context)
-      if [[ $# -lt 2 || -z "$2" || "$2" == -* ]]; then
-        echo "ERROR: --context requires a value" >&2
-        exit 1
-      fi
-      CONTEXT="$2"
-      shift 2
-      ;;
-    -h|--help) usage; exit 0 ;;
-    *) usage >&2; exit 1 ;;
-  esac
-done
+parse_args "$@"
 
 for tool in oc helm jq yq python3 openssl curl uv; do
   command -v "$tool" >/dev/null || fail "Required tool missing: $tool"
@@ -65,17 +49,12 @@ sys.exit(0 if m and int(m.group(1)) >= 3 else 1)
 fi
 ((FAILURES == 0)) || exit 1
 
-MODEL="$(yq -er '.model' "${SCRIPT_DIR}/files/versions.yaml" 2>/dev/null)" || {
+MODEL="$(yq -er '.model' "${FILES}/versions.yaml" 2>/dev/null)" || {
   fail "Praxis model selection is missing from files/versions.yaml"
   exit 1
 }
 
-if [[ -z "$CONTEXT" ]]; then
-  CONTEXT="$(oc config current-context 2>/dev/null)" || {
-    fail "No current kubeconfig context; pass --context CONTEXT"
-    exit 1
-  }
-fi
+resolve_context
 k get clusterversion version -o name >/dev/null || {
   fail "Cannot read OpenShift cluster version; check context, login, and permissions"
   exit 1
@@ -139,7 +118,7 @@ if ! k get crd adminnetworkpolicies.policy.networking.k8s.io -o json \
   | jq -e 'any(.status.conditions[]?; .type == "Established" and .status == "True")' >/dev/null; then
   fail "AdminNetworkPolicy support is required for the OGX ingress trust boundary"
 else
-  priority="$(yq '.spec.priority' "${SCRIPT_DIR}/files/ogx-adminnetworkpolicy.yaml")"
+  priority="$(yq '.spec.priority' "${FILES}/ogx-adminnetworkpolicy.yaml")"
   if ! k get adminnetworkpolicies -o json | jq -e --argjson priority "$priority" '
     all(.items[];
       if .metadata.name == "praxis-mvp-ogx" then

@@ -4,41 +4,17 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FILES="${SCRIPT_DIR}/files"
-CONTEXT=""
-NAMESPACE=redhat-ods-applications
-TIMEOUT=15m
+# shellcheck source=lib.sh
+source "${SCRIPT_DIR}/lib.sh"
 
-die() { echo "ERROR: $*" >&2; exit 1; }
-usage() {
-  echo "Usage: $0 [--context CONTEXT]"
-  echo "Install Praxis gateways and switch the provisioned OGX deployment into Praxis mode."
-}
-k() { oc --context "$CONTEXT" --request-timeout=30s "$@" 2>/dev/null; }
-apply() { k apply -f - >/dev/null; }
-wait_for() { k wait --request-timeout=0 --timeout="$TIMEOUT" "$@" >/dev/null; }
-rollout() { k -n "$1" rollout status "deployment/$2" --request-timeout=0 --timeout="$TIMEOUT" >/dev/null; }
+USAGE="Install Praxis gateways and switch the provisioned OGX deployment into Praxis mode."
 
-while (($#)); do
-  case "$1" in
-    --context)
-      [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || die "--context requires a value"
-      CONTEXT="$2"; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
-    *) usage >&2; exit 1 ;;
-  esac
-done
-command -v oc >/dev/null || die "oc is required"
-if [[ -z "$CONTEXT" ]]; then
-  CONTEXT="$(oc config current-context 2>/dev/null)" || die "Pass --context CONTEXT"
-fi
-"${SCRIPT_DIR}/pre-flight.sh" --context "$CONTEXT"
+parse_args "$@"
+require_tools oc
+resolve_context
+preflight
 
-WORK_DIR="$(mktemp -d)"
-trap 'rm -rf "$WORK_DIR"' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'echo "ERROR: Installation failed at line $LINENO. Resolve the prerequisite and rerun." >&2' ERR
+setup_workdir Installation
 MODEL="$(yq -er '.model' "${FILES}/versions.yaml")"
 VERSION="$(yq -er '.grid.version' "${FILES}/versions.yaml")"
 IMAGE="$(yq -er '.praxis.image' "${FILES}/versions.yaml")"
