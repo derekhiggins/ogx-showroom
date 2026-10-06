@@ -51,6 +51,40 @@ resolve_context() {
 
 preflight() { "${SCRIPT_DIR}/pre-flight.sh" --context "$CONTEXT"; }
 
+# Load the OGX container's environment into ENVIRONMENT for env_value.
+load_ogx_environment() {
+  local deployment
+  deployment="$(k -n "$NAMESPACE" get deployment "${1:-ogx-distribution}" -o json)" || return 1
+  ENVIRONMENT="$(jq '[.spec.template.spec.containers[] | select(.name == "ogx") | .env[]?]' <<< "$deployment")"
+}
+
+# Resolve one OGX setting, following Secret and ConfigMap references. Prints the
+# value without a trailing newline so credentials can be written to files
+# verbatim. Secret data never reaches command output.
+env_value() {
+  local entry ref name key
+  entry="$(jq -c --arg name "$1" '.[] | select(.name == $name)' <<< "$ENVIRONMENT")"
+  [[ -n "$entry" ]] || return 1
+  if jq -e 'has("value")' <<< "$entry" >/dev/null; then
+    jq -ej '.value' <<< "$entry"
+    return
+  fi
+  for ref in secretKeyRef configMapKeyRef; do
+    name="$(jq -r --arg ref "$ref" '.valueFrom[$ref].name // empty' <<< "$entry")"
+    key="$(jq -r --arg ref "$ref" '.valueFrom[$ref].key // empty' <<< "$entry")"
+    [[ -n "$name" ]] || continue
+    if [[ "$ref" == secretKeyRef ]]; then
+      k -n "$NAMESPACE" get secret "$name" -o json \
+        | jq -ej --arg key "$key" '.data[$key] | select(. != null) | @base64d'
+    else
+      k -n "$NAMESPACE" get configmap "$name" -o json \
+        | jq -ej --arg key "$key" '.data[$key] | select(. != null)'
+    fi
+    return
+  done
+  return 1
+}
+
 # Temporary directory plus the standard interrupt/failure traps.
 setup_workdir() {
   WORK_DIR="$(mktemp -d)"

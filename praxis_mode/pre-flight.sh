@@ -170,35 +170,9 @@ if ! k -n "$NAMESPACE" get pvc postgres-pvc milvus-pvc etcd-pvc minio-pvc -o jso
   fail "Showroom PostgreSQL, Milvus, etcd, and MinIO PVCs must be Bound"
 fi
 
-DEPLOYMENT="$(k -n "$NAMESPACE" get deployment "$OGX_NAME" -o json)" || {
+load_ogx_environment "$OGX_NAME" || {
   fail "Cannot discover the OGX deployment"
   exit 1
-}
-ENVIRONMENT="$(jq '[.spec.template.spec.containers[] | select(.name == "ogx") | .env[]?]' <<< "$DEPLOYMENT")"
-
-# Resolve only requested settings. Secret data never reaches command output.
-env_value() {
-  local entry ref name key
-  entry="$(jq -c --arg name "$1" '.[] | select(.name == $name)' <<< "$ENVIRONMENT")"
-  [[ -n "$entry" ]] || return 0
-  if jq -e 'has("value")' <<< "$entry" >/dev/null; then
-    jq -r '.value' <<< "$entry"
-    return
-  fi
-  for ref in secretKeyRef configMapKeyRef; do
-    name="$(jq -r --arg ref "$ref" '.valueFrom[$ref].name // empty' <<< "$entry")"
-    key="$(jq -r --arg ref "$ref" '.valueFrom[$ref].key // empty' <<< "$entry")"
-    [[ -n "$name" ]] || continue
-    if [[ "$ref" == secretKeyRef ]]; then
-      k -n "$NAMESPACE" get secret "$name" -o json \
-        | jq -er --arg key "$key" '.data[$key] | select(. != null) | @base64d'
-    else
-      k -n "$NAMESPACE" get configmap "$name" -o json \
-        | jq -er --arg key "$key" '.data[$key] | select(. != null)'
-    fi
-    return
-  done
-  return 1
 }
 
 for setting in OPENAI_API_KEY POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD EMBEDDING_MODEL EMBEDDING_PROVIDER EMBEDDING_DIMENSION VLLM_EMBEDDING_URL VLLM_EMBEDDING_API_TOKEN MILVUS_ENDPOINT S3_BUCKET_NAME S3_ENDPOINT_URL AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
@@ -227,7 +201,7 @@ for setting in EMBEDDING_MODEL EMBEDDING_PROVIDER EMBEDDING_DIMENSION S3_BUCKET_
 done
 unset value
 
-unset DEPLOYMENT ENVIRONMENT
+unset ENVIRONMENT
 
 for crd in gateways.gateway.networking.k8s.io httproutes.gateway.networking.k8s.io authpolicies.kuadrant.io externalmodels.inference.opendatahub.io maassubscriptions.maas.opendatahub.io; do
   if ! k get crd "$crd" -o json | jq -e 'any(.status.conditions[]?; .type == "Established" and .status == "True")' >/dev/null; then

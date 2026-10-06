@@ -35,29 +35,7 @@ sys.exit(0 if hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()
 PY
 done
 
-ENVIRONMENT="$(k -n "$NAMESPACE" get deployment ogx-distribution -o json \
-  | jq '[.spec.template.spec.containers[] | select(.name == "ogx") | .env[]?]')"
-env_value() {
-  local entry ref name key
-  entry="$(jq -c --arg name "$1" '.[] | select(.name == $name)' <<< "$ENVIRONMENT")"
-  [[ -n "$entry" ]] || return 1
-  if jq -e 'has("value")' <<< "$entry" >/dev/null; then
-    jq -ej '.value' <<< "$entry"
-    return
-  fi
-  for ref in secretKeyRef configMapKeyRef; do
-    name="$(jq -r --arg ref "$ref" '.valueFrom[$ref].name // empty' <<< "$entry")"
-    key="$(jq -r --arg ref "$ref" '.valueFrom[$ref].key // empty' <<< "$entry")"
-    [[ -n "$name" ]] || continue
-    if [[ "$ref" == secretKeyRef ]]; then
-      k -n "$NAMESPACE" get secret "$name" -o json | jq -ej --arg key "$key" '.data[$key] | select(. != null) | @base64d'
-    else
-      k -n "$NAMESPACE" get configmap "$name" -o json | jq -ej --arg key "$key" '.data[$key] | select(. != null)'
-    fi
-    return
-  done
-  return 1
-}
+load_ogx_environment || die "Cannot discover the OGX deployment"
 env_value OPENAI_API_KEY > "${WORK_DIR}/openai-key"
 env_value POSTGRES_USER > "${WORK_DIR}/pg-user"
 env_value POSTGRES_PASSWORD > "${WORK_DIR}/pg-password"
