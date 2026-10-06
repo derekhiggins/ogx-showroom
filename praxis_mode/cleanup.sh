@@ -70,20 +70,7 @@ if has_crd ogxservers.ogx.io; then
       die "OGX isolation policy ownership, configuration or priority conflicts"
     fi
     k apply -f "${WORK_DIR}/isolation.json" >/dev/null
-    deadline=$((SECONDS + 120))
-    ready=false
-    while ((SECONDS < deadline)); do
-      if k get adminnetworkpolicy praxis-mvp-ogx -o json | jq -e '
-        .metadata.generation as $generation |
-        (.status.conditions // []) | length > 0 and
-        all(.[]; .status == "True" and (.observedGeneration // $generation) >= $generation)
-      ' >/dev/null; then
-        ready=true
-        break
-      fi
-      sleep 5
-    done
-    $ready || die "OGX isolation is not ready"
+    poll_until 120 adminnetworkpolicy_ready praxis-mvp-ogx || die "OGX isolation is not ready"
     route="$(k -n "$NAMESPACE" get route ogx-distribution --ignore-not-found -o json)"
     if [[ -n "$route" ]] && ! jq -e '
       .metadata.annotations["meta.helm.sh/release-name"] == "ogx-rhoai" and
@@ -130,6 +117,13 @@ done < "${WORK_DIR}/mode-crds"
 delete_custom openshift-ingress authpolicies.kuadrant.io maas-gateway-auth
 delete_custom openshift-ingress gateways.gateway.networking.k8s.io maas-default-gateway
 
+dsc_removed() {
+  k get datasciencecluster default-dsc -o json | jq -e --argjson generation "$1" '
+    (.status.observedGeneration // 0) >= $generation and
+    .status.components.aigateway.managementState == "Removed" and
+    .status.components.modelsAsAService.managementState == "Removed"
+  ' >/dev/null
+}
 echo "Disabling RHOAI MaaS and AI gateway..."
 if has_crd datascienceclusters.datasciencecluster.opendatahub.io; then
   dsc="$(k get datasciencecluster default-dsc --ignore-not-found -o name)"
@@ -137,20 +131,7 @@ if has_crd datascienceclusters.datasciencecluster.opendatahub.io; then
     generation="$(k patch datasciencecluster default-dsc --type=merge -o json \
       -p '{"spec":{"components":{"aigateway":{"managementState":"Removed","modelsAsAService":{"managementState":"Removed"}}}}}' \
       | jq -r '.metadata.generation')"
-    deadline=$((SECONDS + 900))
-    removed=false
-    while ((SECONDS < deadline)); do
-      if k get datasciencecluster default-dsc -o json | jq -e --argjson generation "$generation" '
-        (.status.observedGeneration // 0) >= $generation and
-        .status.components.aigateway.managementState == "Removed" and
-        .status.components.modelsAsAService.managementState == "Removed"
-      ' >/dev/null; then
-        removed=true
-        break
-      fi
-      sleep 5
-    done
-    $removed || die "RHOAI did not reconcile MaaS/AI gateway removal"
+    poll_until 900 dsc_removed "$generation" || die "RHOAI did not reconcile MaaS/AI gateway removal"
   fi
 fi
 

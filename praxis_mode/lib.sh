@@ -51,6 +51,31 @@ resolve_context() {
 
 preflight() { "${SCRIPT_DIR}/pre-flight.sh" --context "$CONTEXT"; }
 
+# Run a command every 5 seconds until it succeeds or the timeout expires.
+# On success its standard output is left in POLL_OUTPUT; output from failed
+# attempts is discarded.
+poll_until() {
+  local seconds="$1" deadline
+  shift
+  deadline=$((SECONDS + seconds))
+  while :; do
+    if POLL_OUTPUT="$("$@")"; then
+      return 0
+    fi
+    ((SECONDS < deadline)) || return 1
+    sleep 5
+  done
+}
+
+# The CNI has observed and accepted the current AdminNetworkPolicy generation.
+adminnetworkpolicy_ready() {
+  k get adminnetworkpolicy "$1" -o json | jq -e '
+    .metadata.generation as $generation |
+    (.status.conditions // []) | length > 0 and
+    all(.[]; .status == "True" and (.observedGeneration // $generation) >= $generation)
+  ' >/dev/null
+}
+
 # Load the OGX container's environment into ENVIRONMENT for env_value.
 load_ogx_environment() {
   local deployment

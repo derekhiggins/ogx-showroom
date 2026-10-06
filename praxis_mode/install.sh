@@ -99,20 +99,18 @@ import hashlib, pathlib, sys
 sys.exit(0 if hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest() == sys.argv[2] else 1)
 PY
 
-deadline=$((SECONDS + 120))
-CANDIDATE=""
-while ((SECONDS < deadline)); do
-  if candidate="$(k -n grid-system get configmap grid-overlay-praxis-mvp-consumer-gateway -o json \
+grid_candidate() {
+  k -n grid-system get configmap grid-overlay-praxis-mvp-consumer-gateway -o json \
     | jq -er '.data["routing-config.json"]' | jq -er --arg model "$MODEL" '
       [.candidates[] | select(.kind == "inference_model" and .name == $model and
         .cluster == "openai-mvp-provider" and .site == "mvp")] |
       select(length == 1) | .[0].stable_id | select(type == "string" and length > 0)
-    ')"; then
-    CANDIDATE="$candidate"
-    break
-  fi
-  sleep 5
-done
+    '
+}
+CANDIDATE=""
+if poll_until 120 grid_candidate; then
+  CANDIDATE="$POLL_OUTPUT"
+fi
 [[ "$CANDIDATE" =~ ^[a-zA-Z0-9_.:-]+$ ]] || die "Grid overlay did not publish a unique selected-model candidate; check prepare.sh"
 
 python3 - "$FILES" "$WORK_DIR" "$MODEL" "$CANDIDATE" "$OGX_ENDPOINT" "$OGX_URL" <<'PY'
@@ -177,38 +175,21 @@ yq 'select(.metadata.name == "consumer-gateway") | .spec.ingress = []' "${FILES}
 yq 'select(.metadata.name == "provider-gateway")' "${FILES}/gateway-networkpolicies.yaml" | apply
 echo "Applying OGX ingress isolation and waiting for CNI readiness..."
 apply < "${WORK_DIR}/ogx-adminnetworkpolicy.yaml"
-deadline=$((SECONDS + 120))
-policy_ready=false
-while ((SECONDS < deadline)); do
-  if k get adminnetworkpolicy praxis-mvp-ogx -o json | jq -e '
-    .metadata.generation as $generation |
-    (.status.conditions // []) | length > 0 and
-    all(.[]; .status == "True" and (.observedGeneration // $generation) >= $generation)
-  ' >/dev/null; then
-    policy_ready=true
-    break
-  fi
-  sleep 5
-done
-$policy_ready || die "AdminNetworkPolicy is not ready; consumer remains closed"
+poll_until 120 adminnetworkpolicy_ready praxis-mvp-ogx \
+  || die "AdminNetworkPolicy is not ready; consumer remains closed"
 if [[ -n "$old_route" ]]; then
   k -n "$NAMESPACE" delete route ogx-distribution --ignore-not-found >/dev/null
 fi
 echo "Waiting for OGX Praxis-mode configuration and deployment (timeout $TIMEOUT)..."
 generation="$(k -n "$NAMESPACE" patch ogxserver ogx-distribution --type=merge \
   --patch-file "${FILES}/ogx-patch.yaml" -o json | jq -r '.metadata.generation')"
-deadline=$((SECONDS + 900))
-ogx_ready=false
-while ((SECONDS < deadline)); do
-  if k -n "$NAMESPACE" get ogxserver ogx-distribution -o json | jq -e --argjson generation "$generation" '
+ogx_reconciled() {
+  k -n "$NAMESPACE" get ogxserver ogx-distribution -o json | jq -e --argjson generation "$1" '
     .status.phase == "Ready" and (.status.configGeneration.observedGeneration // 0) >= $generation
-  ' >/dev/null; then
-    ogx_ready=true
-    break
-  fi
-  sleep 5
-done
-$ogx_ready || die "OGX operator did not reconcile Praxis mode; consumer remains closed"
+  ' >/dev/null
+}
+poll_until 900 ogx_reconciled "$generation" \
+  || die "OGX operator did not reconcile Praxis mode; consumer remains closed"
 rollout "$NAMESPACE" ogx-distribution
 config_name="$(k -n "$NAMESPACE" get ogxserver ogx-distribution -o jsonpath='{.status.configGeneration.configMapName}')"
 if ! k -n "$NAMESPACE" get configmap "$config_name" -o json | jq -er '.data["config.yaml"]' \
