@@ -43,7 +43,6 @@ MODEL="$(yq '.model' "${FILES}/versions.yaml")"
 VERSION="$(yq '.grid.version' "${FILES}/versions.yaml")"
 RELEASE_URL="$(yq '.grid.releaseUrl' "${FILES}/versions.yaml")"
 USER_NAME="$(k whoami)"
-VERIFIER=system:serviceaccount:grid-system:praxis-verifier
 
 echo "Preparing Praxis on context: $CONTEXT"
 echo "Creates/reuses praxis_mvp, Grid operator/registration, gateway TLS Secrets, and MaaS prerequisites."
@@ -313,26 +312,26 @@ wait_for --for=create namespace/models-as-a-service
 secret_template praxis-mvp-openai | jq --rawfile token "${WORK_DIR}/openai-key" '.data = {"api-key": ($token | @base64)}' | apply_secret
 
 # Keep existing owners, groups, model references and limits on shared MaaS
-# registration resources; add only this setup user and verification identity.
+# registration resources; add only this setup user.
 for entry in MaaSSubscription:maassubscription MaaSAuthPolicy:maasauthpolicy; do
   kind="${entry%:*}"
   existing="$(k -n models-as-a-service get "${entry#*:}" praxis-mvp --ignore-not-found -o json)"
   [[ -n "$existing" ]] || existing='{}'
   printf '%s' "$existing" > "${WORK_DIR}/${kind}.json"
 done
-yq -o=json '.' "${FILES}/maas-registration.yaml" | jq --arg model "$MODEL" --arg user "$USER_NAME" --arg verifier "$VERIFIER" \
+yq -o=json '.' "${FILES}/maas-registration.yaml" | jq --arg model "$MODEL" --arg user "$USER_NAME" \
   --slurpfile subscription "${WORK_DIR}/MaaSSubscription.json" --slurpfile policy "${WORK_DIR}/MaaSAuthPolicy.json" '
   if .kind == "ExternalModel" then
     .spec.modelName = $model | .spec.externalProviderRefs[0].targetModel = $model
   elif .kind == "MaaSSubscription" then
     .spec = (.spec * ($subscription[0].spec // {})) |
-    .spec.owner.users = ((.spec.owner.users // []) + [$user, $verifier] | unique) |
+    .spec.owner.users = ((.spec.owner.users // []) + [$user] | unique) |
     .spec.modelRefs = ((.spec.modelRefs // []) |
       if any(.name == "praxis-mvp" and .namespace == "models-as-a-service") then .
       else . + [{name: "praxis-mvp", namespace: "models-as-a-service", tokenRateLimits: [{limit: 10000, window: "1m"}]}] end)
   elif .kind == "MaaSAuthPolicy" then
     .spec = (.spec * ($policy[0].spec // {})) |
-    .spec.subjects.users = ((.spec.subjects.users // []) + [$user, $verifier] | unique) |
+    .spec.subjects.users = ((.spec.subjects.users // []) + [$user] | unique) |
     .spec.modelRefs = ((.spec.modelRefs // []) |
       if any(.name == "praxis-mvp" and .namespace == "models-as-a-service") then .
       else . + [{name: "praxis-mvp", namespace: "models-as-a-service"}] end)

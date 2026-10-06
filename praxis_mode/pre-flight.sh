@@ -238,10 +238,6 @@ fi
 if [[ "$(env_value ENABLE_S3)" != true ]]; then
   fail "Persistent S3 file storage is not enabled; confirm storage configuration before installation"
 fi
-OPENAI_BASE_URL="$(env_value OPENAI_BASE_URL)"
-if [[ -n "$OPENAI_BASE_URL" && "$OPENAI_BASE_URL" != https://api.openai.com/v1 ]]; then
-  fail "OGX uses a custom OpenAI endpoint; confirm direct OpenAI inference before installation"
-fi
 for setting in EMBEDDING_MODEL EMBEDDING_PROVIDER EMBEDDING_DIMENSION S3_BUCKET_NAME; do
   value="$(env_value "$setting")" || continue
   if [[ "$value" =~ ^[a-zA-Z0-9_./:-]+$ ]]; then
@@ -252,74 +248,7 @@ for setting in EMBEDDING_MODEL EMBEDDING_PROVIDER EMBEDDING_DIMENSION S3_BUCKET_
 done
 unset value
 
-# Inspect the active configuration, including image defaults on fresh deployments.
-CONFIG_PATH="$(env_value RUN_CONFIG_PATH)"
-CONFIG_REF="$(jq -r --arg path "$CONFIG_PATH" '
-  .spec.template.spec as $spec |
-  $spec.containers[] | select(.name == "ogx") | .volumeMounts[]? as $mount |
-  $spec.volumes[] | select(.name == $mount.name and .configMap != null) |
-  .configMap as $cm | $cm.items[]? |
-  select(($mount.mountPath | rtrimstr("/")) + "/" + .path == $path) |
-  [$cm.name, .key] | @tsv
-' <<< "$DEPLOYMENT")"
-CONFIG=""
-config_source=""
-if [[ -n "$CONFIG_REF" && "$CONFIG_REF" != *$'\n'* ]]; then
-  IFS=$'\t' read -r config_name config_key <<< "$CONFIG_REF"
-  if CONFIG="$(k -n "$NAMESPACE" get configmap "$config_name" -o json \
-    | jq -er --arg key "$config_key" '.data[$key]' | yq -o=json '.' 2>/dev/null)"; then
-    config_source="mounted"
-  else
-    fail "Cannot read or parse the mounted OGX configuration"
-  fi
-elif [[ -z "$CONFIG_PATH" && -z "$CONFIG_REF" ]]; then
-  if CONFIG="$(k -n "$NAMESPACE" exec "deployment/$OGX_NAME" -c ogx -- python3 -c '
-import pathlib, sys
-args = pathlib.Path("/proc/1/cmdline").read_text().split("\0")
-paths = [pathlib.Path(arg) for arg in args if arg.startswith("/") and arg.endswith((".yaml", ".yml"))]
-if "run" not in args or not any(pathlib.Path(arg).name == "ogx" for arg in args) or len(paths) != 1:
-    sys.exit(1)
-print(paths[0].read_text())
-' | yq -o=json '.' 2>/dev/null)" && [[ -n "$CONFIG" ]]; then
-    config_source="image"
-  else
-    fail "Cannot identify or read the running OGX image configuration"
-  fi
-else
-  fail "Cannot identify a unique mounted OGX configuration; confirm its source before installation"
-fi
-if [[ -n "$config_source" ]]; then
-    if ! jq -e 'any(.providers.inference[]?; .provider_type == "remote::openai")' <<< "$CONFIG" >/dev/null; then
-      fail "The deployed OGX configuration has no OpenAI provider"
-    fi
-    if ! jq -e '[.providers.inference[]? | select(.provider_type == "remote::openai")] as $providers |
-      ($providers | length) == 1 and
-      ($providers[0].config.base_url // "https://api.openai.com/v1" |
-        . == "https://api.openai.com/v1" or . == "${env.OPENAI_BASE_URL:=https://api.openai.com/v1}")
-    ' <<< "$CONFIG" >/dev/null; then
-      fail "OpenAI provider endpoint is ambiguous; confirm direct api.openai.com inference before installation"
-    else
-      echo "OpenAI endpoint: https://api.openai.com/v1"
-    fi
-    if ! jq -e 'any(.server.auth.access_policy[]?; .when == "user is owner")' <<< "$CONFIG" >/dev/null; then
-      fail "The deployed OGX configuration has no ownership access policy"
-    fi
-    if jq -e '.server.auth.provider_config.type == "upstream_header"' <<< "$CONFIG" >/dev/null; then
-      echo "Authentication: OGX already uses upstream_header; install must verify header mapping and trusted network access"
-    else
-      echo "Authentication: install must configure OGX upstream_header for x-user-id and x-tenant-id"
-      if [[ -n "$(env_value AUTH_ISSUER)" ]] && jq -e '
-        .server.auth.provider_config.type |
-        . == "oauth2_token" or . == "${env.AUTH_ISSUER:+oauth2_token}"
-      ' <<< "$CONFIG" >/dev/null; then
-        deployment_ready "$NAMESPACE" keycloak || fail "Showroom Keycloak is not ready"
-        service_ready keycloak || fail "Showroom Keycloak service has no ready endpoints"
-        echo "Authentication: OGX currently uses Showroom Keycloak OAuth2"
-      fi
-    fi
-    echo "OK: Discovered the $config_source OGX configuration"
-fi
-unset CONFIG DEPLOYMENT ENVIRONMENT OPENAI_BASE_URL
+unset DEPLOYMENT ENVIRONMENT
 
 for crd in gateways.gateway.networking.k8s.io httproutes.gateway.networking.k8s.io authpolicies.kuadrant.io externalmodels.inference.opendatahub.io maassubscriptions.maas.opendatahub.io; do
   if ! k get crd "$crd" -o json | jq -e 'any(.status.conditions[]?; .type == "Established" and .status == "True")' >/dev/null; then

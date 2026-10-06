@@ -42,8 +42,7 @@ MAAS_HOST="$(k -n openshift-ingress get gateway maas-default-gateway -o jsonpath
   || die "Cannot find the MaaS gateway address"
 [[ "$MAAS_HOST" =~ ^[a-zA-Z0-9.-]+$ ]] || die "MaaS gateway has no valid address"
 
-TOKEN="$(k -n grid-system create token praxis-verifier --duration=1h)" \
-  || die "Cannot obtain the praxis-verifier token"
+TOKEN="$(k whoami -t)" || die "Cannot obtain the logged-in user's token"
 # The gateway's internal service certificate does not match its external address.
 MAAS_API_KEY="$(request "$TOKEN" --insecure --connect-timeout 15 --max-time 60 \
   "https://${MAAS_HOST}/maas-api/v1/api-keys" \

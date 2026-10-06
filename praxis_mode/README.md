@@ -62,7 +62,6 @@ expires after one hour; the script does not revoke it on exit.
 | `ConfigMap/provider-praxis-config` | Provider pipeline: trusted peers, provider-route validation, state APIs and inference/tool processing. |
 | `Secret/praxis-model-policy` | Consumer's OPA model-entitlement policy and model-to-reference mapping. |
 | `Service/provider-state` | Exposes the provider's separate state/supporting-API listener on port `8444`. |
-| `ServiceAccount/praxis-verifier` | Persistent identity used by the demo to obtain a MaaS key. |
 
 The consumer listens on HTTP port `8080`. The provider's inference and state
 listeners use mutual TLS on ports `8443` and `8444`. Its agentic listener is
@@ -99,9 +98,8 @@ These resources are defined in [`files/maas-registration.yaml`](files/maas-regis
 | `MaaSSubscription/praxis-mvp` | Lists owners and entitled model references; the default model budget is 10,000 tokens/minute. |
 | `MaaSAuthPolicy/praxis-mvp` | Declares subjects authorized for the MaaS model reference. This is distinct from Kuadrant's frontend `AuthPolicy`. |
 
-Preparation adds the setup user and
-`system:serviceaccount:grid-system:praxis-verifier` to subscription owners and
-MaaSAuthPolicy subjects. Existing users, groups, model references and limits are
+Preparation adds the setup user to subscription owners and MaaSAuthPolicy
+subjects. Existing users, groups, model references and limits are
 retained. The setup user was `cluster-admin` in the verified deployment.
 
 The registration/entitlement chain is:
@@ -218,7 +216,7 @@ and authorize resource access using the authenticated identity and ownership.
 
 ### 1. Obtain a subscription-bound MaaS key
 
-The demo obtains an OpenShift token for `praxis-verifier` and uses it to call:
+The demo uses the logged-in user's OpenShift token (`oc whoami -t`) to call:
 
 ```text
 POST /maas-api/v1/api-keys
@@ -227,6 +225,7 @@ POST /maas-api/v1/api-keys
 
 MaaS authenticates the caller and checks user/group membership against the
 subscription owners. It returns a key bound to that identity and subscription.
+Run the demo as the setup user or another subscription owner.
 The OpenShift token is for key management; subsequent Praxis requests use the
 MaaS key.
 
@@ -253,8 +252,7 @@ On success, Authorino injects headers into the upstream request:
 | `X-MaaS-Owner-Tenant` | Same tenant/subscription scope; Praxis state-owner tenant. |
 | `X-MaaS-Subscription-Info` | Selected subscription JSON; consumer entitlement input. |
 
-For the demo, the principal is
-`system:serviceaccount:grid-system:praxis-verifier` and the tenant scope is
+For the demo, the principal is the logged-in OpenShift user and the tenant scope is
 `models-as-a-service_praxis-mvp`.
 
 ### 3. Authorize the requested inference model
