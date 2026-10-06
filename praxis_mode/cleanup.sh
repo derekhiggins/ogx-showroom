@@ -119,15 +119,24 @@ if has_crd ogxservers.ogx.io; then
   fi
 fi
 
-echo "Removing public routing, gateways and model registrations..."
+echo "Removing public routing and Praxis gateways..."
 delete -n openshift-ingress route praxis-mvp
 delete_custom grid-system httproutes.gateway.networking.k8s.io praxis-mvp
 delete_custom grid-system authpolicies.kuadrant.io praxis-mvp
-delete_custom openshift-ingress authpolicies.kuadrant.io maas-gateway-auth
 delete_custom openshift-ingress gateways.gateway.networking.k8s.io praxis-mvp
 uninstall consumer-gateway
 uninstall provider-gateway
 uninstall grid-site
+
+echo "Draining MaaS tenants before removing controllers..."
+controller="$(k -n "$NAMESPACE" get deployment maas-controller --ignore-not-found -o name)"
+if [[ -n "$controller" ]]; then
+  # Disable bootstrap/self-heal and let tenant finalizers finish with controllers alive.
+  k -n "$NAMESPACE" annotate "$controller" maas.opendatahub.io/teardown-requested=true --overwrite >/dev/null
+  k -n "$NAMESPACE" wait "$controller" \
+    --for=jsonpath='{.metadata.annotations.maas\.opendatahub\.io/teardown-completed}'=true \
+    --request-timeout=0 --timeout="$TIMEOUT" >/dev/null
+fi
 
 # Keep controllers running until their custom-resource finalizers finish.
 jq -r '.items[] | select(.spec.group == "grid.praxis-proxy.io" or
@@ -140,6 +149,7 @@ while IFS=$'\t' read -r resource scope; do
     delete "$resource" --all
   fi
 done < "${WORK_DIR}/mode-crds"
+delete_custom openshift-ingress authpolicies.kuadrant.io maas-gateway-auth
 delete_custom openshift-ingress gateways.gateway.networking.k8s.io maas-default-gateway
 
 echo "Disabling RHOAI MaaS and AI gateway..."
