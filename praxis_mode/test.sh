@@ -49,12 +49,12 @@ def require(condition, message):
         raise Failure(message)
 
 
-def oc(*args, input=None, timeout=60):
+def oc(*args, input=None, timeout=60, description=None):
     result = subprocess.run(
         ["oc", "--context", context, "--request-timeout=30s", *args],
         input=input, text=True, capture_output=True, timeout=timeout,
     )
-    require(result.returncode == 0, "Cluster command failed during " + stage)
+    require(result.returncode == 0, description or "Cluster command failed during " + stage)
     return result.stdout.strip()
 
 
@@ -62,7 +62,7 @@ def get(ns, resource, name, optional=False):
     args = ["-n", ns, "get", resource, name, "-o", "json"]
     if optional:
         args.append("--ignore-not-found")
-    output = oc(*args)
+    output = oc(*args, description=f"Cannot read {resource}/{name} in {ns} during {stage}")
     return json.loads(output) if output else None
 
 
@@ -354,7 +354,8 @@ signal.signal(signal.SIGTERM, interrupted)
 warnings.filterwarnings("ignore", category=InsecureRequestWarning)
 try:
     model = yaml.safe_load((files / "versions.yaml").read_text())["model"]
-    route = get("openshift-ingress", "route", "praxis-mvp")
+    route = get("openshift-ingress", "route", "praxis-mvp", optional=True)
+    require(route is not None, "Run install.sh first: Praxis Route openshift-ingress/praxis-mvp is missing")
     host = route["spec"]["host"]
     require(re.fullmatch(r"[A-Za-z0-9.-]+", host), "Praxis Route has no valid hostname")
     endpoint = "https://" + host

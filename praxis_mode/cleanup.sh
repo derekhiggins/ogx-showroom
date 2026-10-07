@@ -17,6 +17,45 @@ resolve_context
 
 setup_workdir Cleanup
 
+remaining_metadata() {
+  jq '.items // [.] | .[] | {kind, namespace: .metadata.namespace, name: .metadata.name,
+    deletionTimestamp: .metadata.deletionTimestamp, finalizers: .metadata.finalizers,
+    namespaceFinalizers: .spec.finalizers, conditions: .status.conditions}'
+}
+namespace_diagnostics() {
+  local namespace="$1" resources resource
+  echo "Remaining resources in namespace $namespace:" >&2
+  resources="$(k api-resources --verbs=list --namespaced=true -o name)" || return 1
+  while IFS= read -r resource; do
+    # Package manifests are virtual catalog entries, not namespace content.
+    [[ "$resource" != packagemanifests.packages.operators.coreos.com ]] || continue
+    if ! k -n "$namespace" get "$resource" -o json | remaining_metadata >&2; then
+      echo "Cannot inspect $resource in $namespace" >&2
+    fi
+  done <<< "$resources"
+}
+delete() {
+  local arg
+  local -a inspect=()
+  echo "Deleting (timeout $TIMEOUT): $*" >&2
+  if oc --context "$CONTEXT" delete --request-timeout=0 --ignore-not-found \
+    --timeout="$TIMEOUT" "$@" >/dev/null; then
+    return 0
+  fi
+  echo "Deletion failed; remaining objects and finalizers:" >&2
+  for arg in "$@"; do
+    [[ "$arg" != --all ]] || continue
+    inspect+=("$arg")
+  done
+  k get --ignore-not-found "${inspect[@]}" -o json | remaining_metadata >&2 || true
+  if [[ "$1" == namespace ]]; then
+    for arg in "${@:2}"; do
+      namespace_diagnostics "$arg" || true
+    done
+  fi
+  return 1
+}
+
 # Discover APIs explicitly so missing CRDs are harmless, but failed reads are not.
 k get crd -o json > "${WORK_DIR}/crds.json"
 has_crd() { jq -e --arg name "$1" 'any(.items[]; .metadata.name == $name)' "${WORK_DIR}/crds.json" >/dev/null; }
@@ -29,6 +68,7 @@ uninstall() {
   local release="$1" releases
   releases="$(helm list --kube-context "$CONTEXT" -n grid-system --all -o json 2>/dev/null)"
   if jq -e --arg name "$release" 'any(.[]; .name == $name)' <<< "$releases" >/dev/null; then
+    echo "Uninstalling $release (timeout $TIMEOUT)..."
     helm uninstall "$release" --kube-context "$CONTEXT" -n grid-system \
       --wait --timeout="$TIMEOUT" >/dev/null 2>&1
   fi
@@ -98,6 +138,7 @@ controller="$(k -n "$NAMESPACE" get deployment maas-controller --ignore-not-foun
 if [[ -n "$controller" ]]; then
   # Disable bootstrap/self-heal and let tenant finalizers finish with controllers alive.
   k -n "$NAMESPACE" annotate "$controller" maas.opendatahub.io/teardown-requested=true --overwrite >/dev/null
+  echo "Waiting for MaaS tenant teardown (timeout $TIMEOUT)..."
   k -n "$NAMESPACE" wait "$controller" \
     --for=jsonpath='{.metadata.annotations.maas\.opendatahub\.io/teardown-completed}'=true \
     --request-timeout=0 --timeout="$TIMEOUT" >/dev/null
@@ -131,6 +172,7 @@ if has_crd datascienceclusters.datasciencecluster.opendatahub.io; then
     generation="$(k patch datasciencecluster default-dsc --type=merge -o json \
       -p '{"spec":{"components":{"aigateway":{"managementState":"Removed","modelsAsAService":{"managementState":"Removed"}}}}}' \
       | jq -r '.metadata.generation')"
+    echo "Waiting for RHOAI MaaS/AI gateway removal (timeout 15m)..."
     poll_until 900 dsc_removed "$generation" || die "RHOAI did not reconcile MaaS/AI gateway removal"
   fi
 fi

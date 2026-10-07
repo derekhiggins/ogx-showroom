@@ -21,8 +21,14 @@ usage() {
 k() { oc --context "$CONTEXT" --request-timeout="$REQUEST_TIMEOUT" "$@" 2>/dev/null; }
 apply() { k apply -f - >/dev/null; }
 delete() { k delete --request-timeout=0 --ignore-not-found --timeout="$TIMEOUT" "$@" >/dev/null; }
-wait_for() { k wait --request-timeout=0 --timeout="$TIMEOUT" "$@" >/dev/null; }
-rollout() { k -n "$1" rollout status "deployment/$2" --request-timeout=0 --timeout="$TIMEOUT" >/dev/null; }
+wait_for() {
+  echo "Waiting (timeout $TIMEOUT): $*" >&2
+  k wait --request-timeout=0 --timeout="$TIMEOUT" "$@" >/dev/null
+}
+rollout() {
+  echo "Waiting for deployment $1/$2 (timeout $TIMEOUT)..." >&2
+  k -n "$1" rollout status "deployment/$2" --request-timeout=0 --timeout="$TIMEOUT" >/dev/null
+}
 
 parse_args() {
   while (($#)); do

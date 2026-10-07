@@ -181,6 +181,7 @@ unset maas_db
 apply < "${FILES}/database-networkpolicies.yaml"
 echo "Praxis database and credential Secrets are ready. Existing MaaS database configuration is retained."
 
+echo "Installing Grid operator (timeout $TIMEOUT)..."
 helm upgrade --install grid-operator "${WORK_DIR}/grid-operator-${VERSION}.tgz" --kube-context "$CONTEXT" \
   -n grid-system --reuse-values -f "${FILES}/grid-operator.yaml" --wait --timeout "$TIMEOUT" >/dev/null 2>&1
 for crd in gridnetworks gridsites inferenceproviders agenttoolproviders; do
@@ -196,6 +197,7 @@ yq -o=json '.' "${FILES}/grid-site.yaml" | jq --arg model "$MODEL" --slurpfile e
   .inferenceProviders[0] = ((.inferenceProviders[0] * ($existing[0].spec // {})) |
     .models = ((.models // []) + [{name: $model, capabilities: ["text_generation"]}] | unique_by(.name)))
 ' > "${WORK_DIR}/grid-site.json"
+echo "Installing Grid registration (timeout $TIMEOUT)..."
 helm upgrade --install grid-site "${WORK_DIR}/grid-site-${VERSION}.tgz" --kube-context "$CONTEXT" \
   -n grid-system --reuse-values -f "${WORK_DIR}/grid-site.json" --wait --timeout "$TIMEOUT" >/dev/null 2>&1
 echo "Grid $VERSION operator and registration are ready."
@@ -224,7 +226,8 @@ wait_for -n kuadrant-system subscription/rhcl-operator --for=jsonpath='{.status.
 csv="$(k -n kuadrant-system get subscription rhcl-operator -o jsonpath='{.status.currentCSV}')"
 wait_for -n kuadrant-system --for=create "csv/$csv"
 wait_for -n kuadrant-system "csv/$csv" --for=jsonpath='{.status.phase}'=Succeeded
-wait_for --for=condition=Established crd/authpolicies.kuadrant.io crd/kuadrants.kuadrant.io
+wait_for --for=condition=Established crd/authpolicies.kuadrant.io crd/kuadrants.kuadrant.io \
+  crd/authorinos.operator.authorino.kuadrant.io crd/limitadors.limitador.kuadrant.io
 for name in authorino-operator limitador-operator-controller-manager; do
   wait_for -n kuadrant-system --for=create "deployment/$name"
   rollout kuadrant-system "$name"
@@ -234,8 +237,21 @@ if [[ -z "$kuadrant" ]]; then
   yq 'select(.kind == "Kuadrant")' "${FILES}/kuadrant.yaml" | apply
 fi
 yq 'select(.kind == "ConfigMap")' "${FILES}/kuadrant.yaml" | apply
+echo "Waiting for Kuadrant readiness (timeout 60s)..."
 if ! k -n kuadrant-system wait kuadrant/kuadrant --for=condition=Ready --timeout=60s --request-timeout=0 >/dev/null; then
-  k -n kuadrant-system rollout restart deployment/kuadrant-operator-controller-manager >/dev/null
+  status="$(k -n kuadrant-system get kuadrant kuadrant -o json)"
+  jq '.status.conditions' <<< "$status" >&2
+  if jq -e 'any(.status.conditions[]?; .type == "Ready" and .reason == "MissingDependency")' <<< "$status" >/dev/null; then
+    # Recreate the pod so dependency discovery runs again.
+    echo "Recreating Kuadrant operator pods to rediscover installed dependencies..."
+    selector="$(k -n kuadrant-system get deployment kuadrant-operator-controller-manager -o json \
+      | jq -er '.spec.selector.matchLabels | to_entries | map(.key + "=" + .value) | join(",") | select(length > 0)')"
+    pods="$(k -n kuadrant-system get pods -l "$selector" -o name)"
+    [[ -n "$pods" ]] || die "No Kuadrant operator pod found for dependency recovery"
+    while IFS= read -r pod; do
+      k -n kuadrant-system delete "$pod" --wait=false >/dev/null
+    done <<< "$pods"
+  fi
   wait_for -n kuadrant-system kuadrant/kuadrant --for=condition=Ready
 fi
 wait_for -n kuadrant-system configmap/openshift-service-ca.crt --for=jsonpath='{.data.service-ca\.crt}'
