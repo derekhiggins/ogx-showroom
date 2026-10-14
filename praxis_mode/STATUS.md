@@ -2,6 +2,8 @@
 
 Updated: 2026-10-14.
 
+For prerequisites, deployment and demo commands, see [README.md](README.md).
+
 ## Current position
 
 - The demo uses AITenant `praxis-demo`, OpenAI ExternalProvider/ExternalModel

@@ -219,16 +219,8 @@ oc get pod -l app=ogx -n redhat-ods-applications \
 
 ## Praxis mode
 
-Praxis mode runs after `./provision.sh`, See the [Praxis mode README](praxis_mode/README.md) for resources,
-request flow and authorization.
-Run the four mode scripts in order:
-
-```bash
-./praxis_mode/pre-flight.sh --context YOUR_CONTEXT
-./praxis_mode/prepare.sh --context YOUR_CONTEXT
-./praxis_mode/install.sh --context YOUR_CONTEXT
-./praxis_mode/test.sh --context YOUR_CONTEXT
-```
+See the [Praxis demo guide](praxis_mode/README.md) for prerequisites, recorded-image
+deployment, Responses enablement, paid validation and cleanup.
 
 ## Testing
 
