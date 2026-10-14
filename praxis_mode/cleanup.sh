@@ -1,220 +1,131 @@
 #!/usr/bin/env bash
 set +x
-set -Eeuo pipefail
-umask 077
+set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=lib.sh
-source "${SCRIPT_DIR}/lib.sh"
+FULL=false
+case "${1:-}" in
+  '') ;;
+  --full) FULL=true ;;
+  --help)
+    cat <<'EOF'
+Usage: bash praxis_mode/cleanup.sh [--full]
 
-USAGE="Remove Praxis, Grid, RHCL/Kuadrant and MaaS, including both Praxis databases.
-Deletes grid-system, kuadrant-system, models-as-a-service and redhat-ai-gateway-infra.
-Keeps OGX isolated with its configuration and praxis-mvp-ogx AdminNetworkPolicy."
+Remove the Praxis demo resources, AITenant and dedicated Gateway.
+--full also removes owned MaaS PostgreSQL and its PVC.
+Shared Responses PostgreSQL, certificates and platform bindings are never removed.
+Owned MaaS database data is permanently lost. Refuses detected foreign consumers.
 
-parse_args "$@"
-require_tools oc helm jq yq
-resolve_context
-
-setup_workdir Cleanup
-
-remaining_metadata() {
-  jq '.items // [.] | .[] | {kind, namespace: .metadata.namespace, name: .metadata.name,
-    deletionTimestamp: .metadata.deletionTimestamp, finalizers: .metadata.finalizers,
-    namespaceFinalizers: .spec.finalizers, conditions: .status.conditions}'
-}
-namespace_diagnostics() {
-  local namespace="$1" resources resource
-  echo "Remaining resources in namespace $namespace:" >&2
-  resources="$(k api-resources --verbs=list --namespaced=true -o name)" || return 1
-  while IFS= read -r resource; do
-    # Package manifests are virtual catalog entries, not namespace content.
-    [[ "$resource" != packagemanifests.packages.operators.coreos.com ]] || continue
-    if ! k -n "$namespace" get "$resource" -o json | remaining_metadata >&2; then
-      echo "Cannot inspect $resource in $namespace" >&2
-    fi
-  done <<< "$resources"
-}
-delete() {
-  local arg
-  local -a inspect=()
-  echo "Deleting (timeout $TIMEOUT): $*" >&2
-  if oc --context "$CONTEXT" delete --request-timeout=0 --ignore-not-found \
-    --timeout="$TIMEOUT" "$@" >/dev/null; then
-    return 0
-  fi
-  echo "Deletion failed; remaining objects and finalizers:" >&2
-  for arg in "$@"; do
-    [[ "$arg" != --all ]] || continue
-    inspect+=("$arg")
-  done
-  k get --ignore-not-found "${inspect[@]}" -o json | remaining_metadata >&2 || true
-  if [[ "$1" == namespace ]]; then
-    for arg in "${@:2}"; do
-      namespace_diagnostics "$arg" || true
-    done
-  fi
-  return 1
-}
-
-# Discover APIs explicitly so missing CRDs are harmless, but failed reads are not.
-k get crd -o json > "${WORK_DIR}/crds.json"
-has_crd() { jq -e --arg name "$1" 'any(.items[]; .metadata.name == $name)' "${WORK_DIR}/crds.json" >/dev/null; }
-delete_custom() {
-  local namespace="$1" resource="$2" name="$3"
-  has_crd "$resource" || return 0
-  delete -n "$namespace" "$resource" "$name"
-}
-uninstall() {
-  local release="$1" releases
-  releases="$(helm list --kube-context "$CONTEXT" -n grid-system --all -o json 2>/dev/null)"
-  if jq -e --arg name "$release" 'any(.[]; .name == $name)' <<< "$releases" >/dev/null; then
-    echo "Uninstalling $release (timeout $TIMEOUT)..."
-    helm uninstall "$release" --kube-context "$CONTEXT" -n grid-system \
-      --wait --timeout="$TIMEOUT" >/dev/null 2>&1
-  fi
-}
-database_sql() {
-  # Use only the pod's credentials; psql errors may contain connection details.
-  # shellcheck disable=SC2016
-  k -n "$NAMESPACE" exec -i deployment/postgres -- bash -c \
-    'exec psql -U postgres -d postgres -v ON_ERROR_STOP=1 -v owner="$POSTGRESQL_USER"' >/dev/null
-}
-postgres="$(k -n "$NAMESPACE" get deployment postgres --ignore-not-found -o name)"
-if [[ -n "$postgres" ]]; then
-  database_sql <<'SQL' || die "Cannot validate Praxis database ownership on Showroom PostgreSQL"
-SELECT 1 / (pg_get_userbyid(datdba) = :'owner')::int
-FROM pg_database WHERE datname IN ('praxis_mvp', 'praxis_mvp_maas');
-SQL
-fi
-
-echo "Cleaning up Praxis on context: $CONTEXT"
-echo "Removes the shared Grid/RHCL/MaaS stack and all data in praxis_mvp and praxis_mvp_maas."
-
-# Establish isolation even when cleanup follows only a partial preparation.
-if has_crd ogxservers.ogx.io; then
-  cr="$(k -n "$NAMESPACE" get ogxserver ogx-distribution --ignore-not-found -o json)"
-  if [[ -n "$cr" ]]; then
-    has_crd adminnetworkpolicies.policy.networking.k8s.io || die "AdminNetworkPolicy is required to leave OGX isolated"
-    port="$(jq -r '.spec.network.port // 8321' <<< "$cr")"
-    [[ "$port" =~ ^[0-9]+$ ]] && ((port > 0 && port <= 65535)) || die "Invalid OGX API port"
-    PORT="$port" yq -o=json \
-      '(.spec.ingress[0].ports[0].portNumber.port, .spec.ingress[1].ports[0].portNumber.port) = env(PORT)' \
-      "${FILES}/ogx-adminnetworkpolicy.yaml" > "${WORK_DIR}/isolation.json"
-    policies="$(k get adminnetworkpolicies -o json)"
-    if ! jq -e --slurpfile expected "${WORK_DIR}/isolation.json" '
-      all(.items[];
-        if .metadata.name == "praxis-mvp-ogx" then
-          .metadata.labels["app.kubernetes.io/managed-by"] == "showroom-praxis" and .spec == $expected[0].spec
-        else .spec.priority != 0 end)
-    ' <<< "$policies" >/dev/null; then
-      die "OGX isolation policy ownership, configuration or priority conflicts"
-    fi
-    k apply -f "${WORK_DIR}/isolation.json" >/dev/null
-    poll_until 120 adminnetworkpolicy_ready praxis-mvp-ogx || die "OGX isolation is not ready"
-    route="$(k -n "$NAMESPACE" get route ogx-distribution --ignore-not-found -o json)"
-    if [[ -n "$route" ]] && ! jq -e '
-      .metadata.annotations["meta.helm.sh/release-name"] == "ogx-rhoai" and
-      .spec.to.name == "ogx-distribution-service"
-    ' <<< "$route" >/dev/null; then
-      die "OGX Route is not the Showroom Route; confirm external exposure"
-    fi
-    k -n "$NAMESPACE" patch ogxserver ogx-distribution --type=merge \
-      -p '{"spec":{"network":{"externalAccess":{"enabled":false}}}}' >/dev/null
-    delete -n "$NAMESPACE" route ogx-distribution
-  fi
-fi
-
-echo "Removing public routing and Praxis gateways..."
-delete -n openshift-ingress route praxis-mvp
-delete_custom grid-system httproutes.gateway.networking.k8s.io praxis-mvp
-delete_custom grid-system authpolicies.kuadrant.io praxis-mvp
-delete_custom openshift-ingress gateways.gateway.networking.k8s.io praxis-mvp
-uninstall consumer-gateway
-uninstall provider-gateway
-uninstall grid-site
-
-echo "Draining MaaS tenants before removing controllers..."
-controller="$(k -n "$NAMESPACE" get deployment maas-controller --ignore-not-found -o name)"
-if [[ -n "$controller" ]]; then
-  # Disable bootstrap/self-heal and let tenant finalizers finish with controllers alive.
-  k -n "$NAMESPACE" annotate "$controller" maas.opendatahub.io/teardown-requested=true --overwrite >/dev/null
-  echo "Waiting for MaaS tenant teardown (timeout $TIMEOUT)..."
-  k -n "$NAMESPACE" wait "$controller" \
-    --for=jsonpath='{.metadata.annotations.maas\.opendatahub\.io/teardown-completed}'=true \
-    --request-timeout=0 --timeout="$TIMEOUT" >/dev/null
-fi
-
-# Keep controllers running until their custom-resource finalizers finish.
-jq -r '.items[] | select(.spec.group == "grid.praxis-proxy.io" or
-  .spec.group == "maas.opendatahub.io" or .spec.group == "inference.opendatahub.io") |
-  [.metadata.name, .spec.scope] | @tsv' "${WORK_DIR}/crds.json" > "${WORK_DIR}/mode-crds"
-while IFS=$'\t' read -r resource scope; do
-  if [[ "$scope" == Namespaced ]]; then
-    delete "$resource" --all --all-namespaces
-  else
-    delete "$resource" --all
-  fi
-done < "${WORK_DIR}/mode-crds"
-delete_custom openshift-ingress authpolicies.kuadrant.io maas-gateway-auth
-delete_custom openshift-ingress gateways.gateway.networking.k8s.io maas-default-gateway
-
-dsc_removed() {
-  k get datasciencecluster default-dsc -o json | jq -e --argjson generation "$1" '
-    (.status.observedGeneration // 0) >= $generation and
-    .status.components.aigateway.managementState == "Removed" and
-    .status.components.modelsAsAService.managementState == "Removed"
-  ' >/dev/null
-}
-echo "Disabling RHOAI MaaS and AI gateway..."
-if has_crd datascienceclusters.datasciencecluster.opendatahub.io; then
-  dsc="$(k get datasciencecluster default-dsc --ignore-not-found -o name)"
-  if [[ -n "$dsc" ]]; then
-    generation="$(k patch datasciencecluster default-dsc --type=merge -o json \
-      -p '{"spec":{"components":{"aigateway":{"managementState":"Removed","modelsAsAService":{"managementState":"Removed"}}}}}' \
-      | jq -r '.metadata.generation')"
-    echo "Waiting for RHOAI MaaS/AI gateway removal (timeout 15m)..."
-    poll_until 900 dsc_removed "$generation" || die "RHOAI did not reconcile MaaS/AI gateway removal"
-  fi
-fi
-
-echo "Removing RHCL/Kuadrant custom resources and operators..."
-jq -r '[.items[] | select(.spec.group == "kuadrant.io" or (.spec.group | endswith(".kuadrant.io")))] |
-  sort_by(if .metadata.name == "kuadrants.kuadrant.io" then 1
-    elif .metadata.name == "authorinos.operator.authorino.kuadrant.io" or
-      .metadata.name == "limitadors.limitador.kuadrant.io" then 2 else 0 end) |
-  .[] | [.metadata.name, .spec.scope] | @tsv' "${WORK_DIR}/crds.json" > "${WORK_DIR}/rhcl-crds"
-while IFS=$'\t' read -r resource scope; do
-  if [[ "$scope" == Namespaced ]]; then
-    delete "$resource" --all --all-namespaces
-  else
-    delete "$resource" --all
-  fi
-done < "${WORK_DIR}/rhcl-crds"
-uninstall grid-operator
-delete namespace grid-system models-as-a-service redhat-ai-gateway-infra kuadrant-system
-
-# OLM cluster-scoped resources can outlive the operator namespace.
-for kind in clusterrole clusterrolebinding validatingwebhookconfiguration mutatingwebhookconfiguration apiservice; do
-  delete "$kind" -l olm.owner.namespace=kuadrant-system
+Keeps shared RHCL/Authorino, AI Gateway/MaaS enablement, image overrides,
+CRDs, and namespaces. Unrelated resources and OGX are not modified.
+Requires cluster-admin and interactive confirmation. No finalizers are forced.
+Overrides: TENANT_NAME (praxis-demo), WAIT_TIMEOUT (600s).
+EOF
+    exit 0 ;;
+  *) echo 'Use --help for usage.' >&2; exit 2 ;;
+esac
+[[ $# -le 1 ]] || { echo 'Use --help for usage.' >&2; exit 2; }
+TENANT_NAME=${TENANT_NAME:-praxis-demo}
+WAIT_TIMEOUT=${WAIT_TIMEOUT:-600s}
+OWNER=ogx-showroom-praxis
+fail() { echo "ERROR: $*" >&2; exit 1; }
+for tool in oc jq; do
+  command -v "$tool" >/dev/null || fail "$tool is required"
 done
-while IFS=$'\t' read -r resource _; do
-  delete crd "$resource"
-done < "${WORK_DIR}/mode-crds"
-while IFS=$'\t' read -r resource _; do
-  delete crd "$resource"
-done < "${WORK_DIR}/rhcl-crds"
-delete -n "$NAMESPACE" networkpolicy praxis-mvp-postgres praxis-mvp-maas-postgres
+[[ "$TENANT_NAME" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#TENANT_NAME} -le 30 ]] || fail 'TENANT_NAME must be a DNS label of at most 30 characters'
+[[ "$TENANT_NAME" != models-as-a-service ]] || fail 'Cannot remove the shared default tenant'
+CONTEXT=$(oc config current-context)
+OC=(oc --context "$CONTEXT" --request-timeout=30s)
+APP_NS=$("${OC[@]}" get dscinitializations.dscinitialization.opendatahub.io -o json | jq -er '.items | select(length == 1) | .[0].spec.applicationsNamespace')
+MANAGER=$("${OC[@]}" get deployment maas-controller -n "$APP_NS" -o json)
+GW_NS=$(jq -er '.spec.template.spec.containers[].env[] | select(.name == "GATEWAY_NAMESPACE") | .value' <<<"$MANAGER")
+AITENANT_NS=$(jq -er '.spec.template.spec.containers[].env[] | select(.name == "AITENANT_NAMESPACE") | .value' <<<"$MANAGER")
+INFRA_NS=$(jq -er '.spec.template.spec.containers[].env[] | select(.name == "INFRA_NAMESPACE") | .value' <<<"$MANAGER")
+GATEWAY="$TENANT_NAME-gateway"
+TENANT=$("${OC[@]}" get aitenants.maas.opendatahub.io "$TENANT_NAME" -n "$AITENANT_NS" --ignore-not-found -o json)
+[[ -n "$TENANT" ]] || TENANT='{}'
+TENANT_NS=$(jq -r --arg fallback "ai-tenant-$TENANT_NAME" '.status.tenantNamespace // $fallback' <<<"$TENANT")
+[[ "$TENANT_NS" == "ai-tenant-$TENANT_NAME" ]] || fail "Unexpected tenant namespace: $TENANT_NS"
 
-echo "Removing Praxis databases..."
-if [[ -n "$postgres" ]]; then
-  database_sql <<'SQL' || die "Cannot remove Praxis databases; check PostgreSQL and database ownership"
-SELECT 1 / (pg_get_userbyid(datdba) = :'owner')::int
-FROM pg_database WHERE datname IN ('praxis_mvp', 'praxis_mvp_maas');
-SELECT format('DROP DATABASE %I WITH (FORCE)', datname)
-FROM pg_database WHERE datname IN ('praxis_mvp', 'praxis_mvp_maas');
-\gexec
-SQL
-else
-  echo "Showroom PostgreSQL deployment is absent; database deletion was skipped."
+check_owner() {
+  local resource=$1 name=$2 namespace=$3 existing
+  existing=$("${OC[@]}" get "$resource" "$name" -n "$namespace" --ignore-not-found -o json)
+  [[ -z "$existing" ]] || jq -e --arg owner "$OWNER" \
+    '.metadata.labels["app.kubernetes.io/managed-by"] == $owner' <<<"$existing" >/dev/null || \
+    fail "Refusing to delete foreign resource $namespace/$resource/$name"
+}
+delete_owned() {
+  local resource=$1 name=$2 namespace=$3
+  check_owner "$resource" "$name" "$namespace"
+  "${OC[@]}" delete "$resource" "$name" -n "$namespace" --ignore-not-found --cascade=foreground --wait=true --timeout="$WAIT_TIMEOUT"
+}
+check_database_consumers() {
+  local workloads
+  workloads=$("${OC[@]}" get deployments,replicasets,statefulsets,daemonsets,jobs,cronjobs,pods -n "$INFRA_NS" -o json)
+  # Generated Jobs and Pods can lack tenant labels; follow their owner UIDs.
+  jq -e --arg tenant "$TENANT_NAME" --arg owner "$OWNER" '
+    def demo_owned($items; $depth):
+      (.metadata.labels["maas.opendatahub.io/tenant-name"] == $tenant) or
+      (.kind == "Deployment" and .metadata.name == "maas-postgres" and
+       .metadata.labels["app.kubernetes.io/managed-by"] == $owner) or
+      ($depth > 0 and any(.metadata.ownerReferences[]?;
+        .uid as $uid | any($items[];
+          .metadata.uid == $uid and demo_owned($items; $depth - 1))));
+    .items as $items |
+    [$items[] | select(
+      (.metadata.labels["app.kubernetes.io/name"] == "maas-api" or
+       (.spec | tostring | test("maas-db-config|maas-postgres"))) and
+      (demo_owned($items; 4) | not)
+    )] | length == 0' <<<"$workloads" >/dev/null || fail 'Other workloads may use the MaaS database; use cleanup without --full'
+}
+
+# Preflight everything before deleting anything.
+[[ "$TENANT_NS" != "$INFRA_NS" ]] || fail 'Tenant namespace must not be the shared infrastructure namespace'
+check_owner aitenants.maas.opendatahub.io "$TENANT_NAME" "$AITENANT_NS"
+check_owner networkpolicy "$TENANT_NAME-maas-db-egress" "$INFRA_NS"
+for resource in role rolebinding; do
+  check_owner "$resource" "$TENANT_NAME-model-finalizer" "$TENANT_NS"
+done
+for item in "gateway/$GATEWAY" "configmap/$GATEWAY-config" "envoyfilters.networking.istio.io/$GATEWAY-authorino-tls"; do
+  check_owner "${item%%/*}" "${item#*/}" "$GW_NS"
+done
+DB_RESOURCES=(deployment/maas-postgres service/maas-postgres pvc/maas-postgres-data secret/maas-postgres-credentials secret/maas-db-config)
+if "$FULL"; then
+  for item in "${DB_RESOURCES[@]}"; do
+    check_owner "${item%%/*}" "${item#*/}" "$INFRA_NS"
+  done
+  check_database_consumers
 fi
-echo "Praxis cleanup complete. OGX configuration and ingress isolation are retained."
+echo "Context: $CONTEXT"
+echo "Delete demo resources in $TENANT_NS, AITenant $AITENANT_NS/$TENANT_NAME and Gateway $GW_NS/$GATEWAY."
+if "$FULL"; then
+  echo "Also permanently delete the owned MaaS database and PVC in $INFRA_NS."
+fi
+echo 'Shared Responses storage/bindings, platform, namespaces and image overrides will remain.'
+read -r -p "Type $TENANT_NAME to confirm: " CONFIRM || fail 'Confirmation required'
+[[ "$CONFIRM" == "$TENANT_NAME" ]] || fail 'Cleanup cancelled'
+
+# Remove demo models while their controllers and the tenant are still available.
+for resource in maassubscriptions.maas.opendatahub.io maasauthpolicies.maas.opendatahub.io \
+  maasmodelrefs.maas.opendatahub.io externalmodels.inference.opendatahub.io \
+  externalproviders.inference.opendatahub.io secrets; do
+  OBJECTS=$("${OC[@]}" get "$resource" -n "$TENANT_NS" -l "app.kubernetes.io/managed-by=$OWNER" -o json)
+  while IFS= read -r name; do
+    [[ -z "$name" ]] || delete_owned "$resource" "$name" "$TENANT_NS"
+  done < <(jq -r '.items[].metadata.name' <<<"$OBJECTS")
+done
+# Keep the Gateway and database available until tenant finalizers complete.
+delete_owned aitenants.maas.opendatahub.io "$TENANT_NAME" "$AITENANT_NS"
+delete_owned networkpolicy "$TENANT_NAME-maas-db-egress" "$INFRA_NS"
+for resource in rolebinding role; do
+  delete_owned "$resource" "$TENANT_NAME-model-finalizer" "$TENANT_NS"
+done
+for item in "gateway/$GATEWAY" "envoyfilters.networking.istio.io/$GATEWAY-authorino-tls" "configmap/$GATEWAY-config"; do
+  delete_owned "${item%%/*}" "${item#*/}" "$GW_NS"
+done
+if "$FULL"; then
+  check_database_consumers
+  for item in "${DB_RESOURCES[@]}"; do
+    delete_owned "${item%%/*}" "${item#*/}" "$INFRA_NS"
+  done
+fi
+echo 'Cleanup complete. Run ./praxis_mode/setup.sh to provision again.'
